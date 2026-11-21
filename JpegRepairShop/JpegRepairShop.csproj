@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <OutputType>WinExe</OutputType>
+        <TargetFramework>net10.0-windows</TargetFramework>
+        <Nullable>enable</Nullable>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <UseWPF>true</UseWPF>
+        <Product>JPEG Repair Shop</Product>
+        <AssemblyTitle>JPEG Repair Shop</AssemblyTitle>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <!-- Floating versions: restore picks the newest 3.x / 8.x. Pin them once the build works. -->
+        <PackageReference Include="SkiaSharp.Views.WPF" Version="3.*" />
+        <PackageReference Include="CommunityToolkit.Mvvm" Version="8.*" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="..\JpegRepair.Core\JpegRepair.Core.csproj" />
+    </ItemGroup>
+
+</Project>
