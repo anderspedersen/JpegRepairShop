@@ -292,6 +292,110 @@ public sealed partial class JpegDocument : IMcuSource
         return deltas;
     }
 
+    /// <summary>MCU rows' worth of MCUs compared on each side by <see cref="EstimateSectionColourShift"/>.</summary>
+    private const int SectionHistogramRows = 2;
+
+    /// <summary>
+    /// Fixes the colours of the section around <paramref name="index"/> from colour histograms (see
+    /// <see cref="EstimateSectionColourShift"/>): the DC change is applied from the section's first MCU onwards, as one
+    /// undo step. Returns the section and the applied deltas (all zero if the colours already match), or null.
+    /// </summary>
+    public (McuSection Section, int[] Deltas)? FixSectionColours(int index)
+    {
+        var estimate = EstimateSectionColourShift(index);
+        if (estimate is { } found && found.Deltas.Any(d => d != 0))
+            Apply(new DcEdit(found.Section.First, found.Deltas, "Fix section colours"));
+        return estimate;
+    }
+
+    /// <summary>
+    /// The colour shift of the section around <paramref name="index"/> (see <see cref="FindSection"/>), found from colour
+    /// histograms instead of edges, for places where the edges don't line up (garbage or misaligned rows above).
+    /// Per component, the block DC values of the first <see cref="SectionHistogramRows"/> rows' worth of MCUs of the
+    /// section and of the last <see cref="SectionHistogramRows"/> rows' worth of good MCUs before it (skipping bad ones,
+    /// so a garbage band in between does not count) are put into histograms, and the result is the DC change that makes
+    /// the section's histogram overlap the earlier one most (histogram intersection; ties go to the smaller change).
+    /// Only nearby MCUs are compared because a picture's colours change from place to place.
+    /// Null if there is no section at <paramref name="index"/> or no good MCU before it.
+    /// </summary>
+    public (McuSection Section, int[] Deltas)? EstimateSectionColourShift(int index)
+    {
+        if (FindSection(index) is not { } section)
+            return null;
+
+        var bad = FindBadMcus();
+        int window = SectionHistogramRows * Frame.McusPerRow;
+        var inside = new List<int>(window);
+        for (int i = section.First; i <= section.Last && inside.Count < window; i++)
+            inside.Add(i);
+        var before = new List<int>(window);
+        for (int i = section.First - 1; i >= 0 && before.Count < window; i--)
+        {
+            if (IsGood(i, bad))
+                before.Add(i);
+        }
+
+        if (before.Count == 0)
+            return null;
+
+        int components = Frame.Components.Count;
+        var deltas = new int[components];
+        for (int c = 0; c < components; c++)
+        {
+            var sectionHistogram = DcHistogram(inside, c, out int sectionCount);
+            var beforeHistogram = DcHistogram(before, c, out int beforeCount);
+            if (sectionCount == 0 || beforeCount == 0)
+                continue;
+
+            // Largest change that can matter: one that moves the samples across the whole 0..255 range.
+            int maxShift = (int)MathF.Ceiling(255 * 8 / _quant[c][0]);
+            double bestOverlap = -1;
+            for (int shift = -maxShift; shift <= maxShift; shift++)
+            {
+                double overlap = 0;
+                for (int v = 0; v < DcHistogramSize; v++)
+                {
+                    // Section value v, moved by the shift, compared with the earlier MCUs' share at v + shift.
+                    if (sectionHistogram[v] == 0 || (uint)(v + shift) >= DcHistogramSize)
+                        continue;
+                    overlap += Math.Min((double)sectionHistogram[v] / sectionCount, (double)beforeHistogram[v + shift] / beforeCount);
+                }
+
+                if (overlap > bestOverlap + 1e-12 || (Math.Abs(overlap - bestOverlap) <= 1e-12 && Math.Abs(shift) < Math.Abs(deltas[c])))
+                {
+                    bestOverlap = overlap;
+                    deltas[c] = shift;
+                }
+            }
+        }
+
+        return (section, deltas);
+    }
+
+    private const int DcHistogramOffset = 2048;
+    private const int DcHistogramSize = 4096;
+
+    /// <summary>Histogram of the DC values of component <paramref name="component"/>'s blocks in the given MCUs.</summary>
+    private int[] DcHistogram(List<int> mcus, int component, out int count)
+    {
+        var histogram = new int[DcHistogramSize];
+        count = 0;
+        var blocks = Layout.Blocks;
+        foreach (int m in mcus)
+        {
+            var coefficients = _mcus[m].Coefficients;
+            for (int b = 0; b < blocks.Count; b++)
+            {
+                if (blocks[b].ComponentIndex != component)
+                    continue;
+                histogram[Math.Clamp(coefficients[b * 64] + DcHistogramOffset, 0, DcHistogramSize - 1)]++;
+                count++;
+            }
+        }
+
+        return histogram;
+    }
+
     /// <summary>
     /// Per component, the DC change (in quantization steps) that best joins the MCUs from <paramref name="index"/>
     /// (one row's worth) to the row above. Both sides are extrapolated linearly to the boundary line (so smooth

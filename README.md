@@ -18,6 +18,9 @@ Repair Shop shows you the blocks and lets you put them back:
 - **Insert blank MCU**: shifts everything after the selected block one step right (use where data was lost).
 - **Remove MCU**: shifts everything after it one step left (use on garbage blocks).
 - **Fix colours**: corrects the colour/brightness shift from the selected block onwards by matching it to the row above.
+- **Fix section colours**: for when the edges don't line up (garbage or misaligned rows above). Matches the colour
+  histogram of the selected section (the run of good blocks around the selected one) to the good blocks just before
+  it, and corrects the colours from the section's first block onwards.
 - **Adjust DC by hand**: fine-tune brightness (Y) and colour (Cb, Cr) from the selected block onwards. The buttons
   speed up when held down; Shift + mouse wheel moves 10 steps at a time.
 - **Undo / redo** for every edit.

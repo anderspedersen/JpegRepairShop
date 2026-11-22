@@ -80,16 +80,17 @@ public sealed partial class MainViewModel : ObservableObject
     private bool _showGrid = true;
 
     [ObservableProperty]
-    private bool _highlightProblems = true;
+    private bool _highlightProblems;
 
     /// <summary>Outline the section around the selected MCU.</summary>
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(ShownSection))]
-    private bool _showSection = true;
+    private bool _showSection;
 
     /// <summary>The section around the selected MCU (good MCUs in read order, see JpegDocument.FindSection), or null.</summary>
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(SelectedInfo), nameof(ShownSection))]
+    [NotifyCanExecuteChangedFor(nameof(FixSectionColorsCommand))]
     private McuSection? _section;
 
     public McuSection? ShownSection => ShowSection ? Section : null;
@@ -102,7 +103,7 @@ public sealed partial class MainViewModel : ObservableObject
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(ShowWelcome))]
     [NotifyCanExecuteChangedFor(nameof(InsertBlankCommand), nameof(RemoveMcuCommand), nameof(FixColorsCommand),
-        nameof(FixAllCommand), nameof(UndoCommand), nameof(RedoCommand))]
+        nameof(FixSectionColorsCommand), nameof(FixAllCommand), nameof(UndoCommand), nameof(RedoCommand))]
     private bool _isBusy;
 
     /// <summary>Text shown while <see cref="IsBusy"/>.</summary>
@@ -357,6 +358,28 @@ public sealed partial class MainViewModel : ObservableObject
 
     private bool CanFixColors() => HasSelection() && SelectedMcu >= Document!.Frame.McusPerRow;
 
+    private bool CanFixSectionColors() => HasSelection() && Section is { First: > 0 };
+
+    [RelayCommand(CanExecute = nameof(CanFixSectionColors))]
+    private void FixSectionColors()
+    {
+        var doc = Document!;
+        (McuSection Section, int[] Deltas)? result = null;
+        long ms = Timed(() => result = doc.FixSectionColours(SelectedMcu));
+        if (result is not { } fixedSection)
+        {
+            StatusMessage = "No good MCUs before this section to compare its colours with.";
+            return;
+        }
+
+        var (section, deltas) = fixedSection;
+        var names = ComponentNames(doc.Frame);
+        StatusMessage = deltas.Any(d => d != 0)
+            ? $"Section colours corrected from MCU {section.First}: " +
+              string.Join(", ", deltas.Select((d, c) => $"{names[c]} {d:+0;-0;0}")) + $" DC steps. ({ms} ms)"
+            : $"The colours of section {section.First}–{section.Last} already match the MCUs before it.";
+    }
+
     private bool CanUndo() => !IsBusy && Document?.CanUndo == true;
 
     private bool CanRedo() => !IsBusy && Document?.CanRedo == true;
@@ -572,6 +595,7 @@ public sealed partial class MainViewModel : ObservableObject
         InsertBlankCommand.NotifyCanExecuteChanged();
         RemoveMcuCommand.NotifyCanExecuteChanged();
         FixColorsCommand.NotifyCanExecuteChanged();
+        FixSectionColorsCommand.NotifyCanExecuteChanged();
         FixAllCommand.NotifyCanExecuteChanged();
     }
 

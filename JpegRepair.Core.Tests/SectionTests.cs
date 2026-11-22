@@ -67,4 +67,44 @@ public class SectionTests
         doc.Undo();
         Assert.Equal(intact, doc.FindSection(Place - 10));
     }
+
+    [Fact]
+    public void Section_colours_are_matched_to_the_mcus_before_it()
+    {
+        var doc = LoadPhoto();
+
+        // Colours shift from 4037 on; the MCU where the shift starts is flagged, so a new section starts right after it.
+        doc.AdjustDc(Place, [20, -6, 9]);
+        var estimate = doc.EstimateSectionColourShift(Place + 150);
+
+        Assert.NotNull(estimate);
+        var (section, deltas) = estimate.Value;
+        Assert.InRange(section.First, Place - 1, Place + 2);
+        Assert.InRange(deltas[0], -24, -15);
+        Assert.InRange(deltas[1], 4, 8);
+        Assert.InRange(deltas[2], -11, -7);
+    }
+
+    [Fact]
+    public void Section_colour_fix_is_one_undo_step_from_the_section_start()
+    {
+        var doc = LoadPhoto();
+        doc.AdjustDc(Place, [20, -6, 9]);
+
+        var result = doc.FixSectionColours(Place + 150);
+
+        Assert.NotNull(result);
+        int luma = result.Value.Deltas[0];
+        Assert.NotEqual(0, luma);
+        Assert.Equal(20 + luma, doc.GetDcChange(Place + 150, 0));   // inside the section
+        Assert.Equal(0, doc.GetDcChange(Place - 2, 0));             // before it: untouched
+        doc.Undo();
+        Assert.Equal(20, doc.GetDcChange(Place + 150, 0));
+    }
+
+    [Fact]
+    public void A_section_starting_at_the_first_mcu_has_nothing_to_compare_with()
+    {
+        Assert.Null(LoadPhoto().EstimateSectionColourShift(0));
+    }
 }
