@@ -18,6 +18,9 @@ Repair Shop shows you the blocks and lets you put them back:
 - **Insert blank MCU**: shifts everything after the selected block one step right (use where data was lost).
 - **Remove MCU**: shifts everything after it one step left (use on garbage blocks).
 - **Fix colours**: corrects the colour/brightness shift from the selected block onwards by matching it to the row above.
+- **Fix section colours**: for when the edges don't line up (garbage or misaligned rows above). Matches the colour
+  histogram of the selected section (the run of good blocks around the selected one) to the good blocks just before
+  it, and corrects the colours from the section's first block onwards.
 - **Adjust DC by hand**: fine-tune brightness (Y) and colour (Cb, Cr) from the selected block onwards. The buttons
   speed up when held down; Shift + mouse wheel moves 10 steps at a time.
 - **Undo / redo** for every edit.
@@ -31,6 +34,11 @@ Repair Shop shows you the blocks and lets you put them back:
 - The decoder keeps going through damaged data instead of stopping at the first error, so as much of the picture
   as possible is shown. Blocks with invalid data are marked in red, blocks with no data at all with a red cross,
   and the problems found are listed with their position in the file.
+- **Bad-MCU detection** marks blocks in orange that don't fit the picture around them: if the edges to 2 or more of
+  the 4 neighbouring blocks are rugged, and at least one of them is the edge above or below, the block is probably
+  garbage from damaged data or was inserted from elsewhere. Colour shifts and misalignment break only one edge per
+  block, so they aren't marked (except where they start). **Fix colours** and **Fix all** leave marked blocks out
+  when they work out a colour shift.
 - Zoom and pan freely, with an optional MCU grid. Enlarged previews show the block under the cursor and the
   selected block, together with their DC values.
 

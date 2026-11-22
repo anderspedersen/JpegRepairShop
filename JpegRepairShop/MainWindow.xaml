@@ -99,6 +99,7 @@
         <KeyBinding Key="Insert" Command="{Binding InsertBlankCommand}" />
         <KeyBinding Key="Delete" Command="{Binding RemoveMcuCommand}" />
         <KeyBinding Key="F" Command="{Binding FixColorsCommand}" />
+        <KeyBinding Key="F" Modifiers="Shift" Command="{Binding FixSectionColorsCommand}" />
         <KeyBinding Key="A" Modifiers="Control+Shift" Command="{Binding FixAllCommand}" />
     </Window.InputBindings>
 
@@ -113,8 +114,10 @@
                 <Button Style="{StaticResource IconOnlyButton}" Content="&#xE7A6;" Command="{Binding RedoCommand}" ToolTip="{Binding RedoToolTip}" ToolTipService.ShowOnDisabled="True" AutomationProperties.Name="Redo" />
                 <Separator />
                 <CheckBox Content="MCU grid" IsChecked="{Binding ShowGrid}" Margin="2,0" />
+                <CheckBox Content="Section" IsChecked="{Binding ShowSection}" Margin="8,0,2,0"
+                          ToolTip="Outline (cyan) the section around the selected MCU: the good MCUs before and after it in read order, up to the first bad one (corrupt, missing, blank or orange)" />
                 <CheckBox Content="Highlight problems" IsChecked="{Binding HighlightProblems}" Margin="8,0,2,0"
-                          ToolTip="Red = invalid data in this MCU, faint red with cross = not decoded (data ran out), blue = blank MCU you inserted" />
+                          ToolTip="Red = invalid data in this MCU, faint red with cross = not decoded (data ran out), blue = blank MCU you inserted, orange = looks bad (doesn't fit 2 or more of its neighbours)" />
                 <Separator />
                 <Button Style="{StaticResource IconButton}" Tag="&#xE9A6;" Content="Fit" Click="OnFitClick" ToolTip="Fit image to window (Ctrl+0)" />
                 <Button Style="{StaticResource IconButton}" Tag="&#xE71E;" Content="1:1" Click="OnActualSizeClick" ToolTip="Actual size (Ctrl+1)" />
@@ -148,6 +151,10 @@
                     <TextBlock Text="Repair whole picture" Style="{StaticResource Heading}" />
                     <Button Content="Fix all…" Command="{Binding FixAllCommand}" Padding="2,3"
                             ToolTip="Find and fix misaligned MCUs and colour shifts in the whole picture, worst first, until nothing more is found (Ctrl+Shift+A). Shows progress and can be stopped; every fix is its own undo step." />
+
+                    <TextBlock Text="Repair selected section" Style="{StaticResource Heading}" />
+                    <Button Content="Fix section colours" Command="{Binding FixSectionColorsCommand}" Padding="2,3"
+                            ToolTip="Match the colours of the selected section (outlined in cyan) to the good MCUs just before it, by comparing colour histograms instead of edges (Shift+F). For when the edges don't line up, e.g. garbage above. The change applies from the section's first MCU onwards." />
 
                     <TextBlock Text="Repair at selected MCU" Style="{StaticResource Heading}" />
                     <UniformGrid Columns="3">
@@ -211,7 +218,9 @@
                                  SelectedMcu="{Binding SelectedMcu}"
                                  HoverMcu="{Binding HoverMcu}"
                                  ShowGrid="{Binding ShowGrid}"
-                                 HighlightProblems="{Binding HighlightProblems}" />
+                                 HighlightProblems="{Binding HighlightProblems}"
+                                 BadMcus="{Binding BadMcus}"
+                                 Section="{Binding ShownSection}" />
             <controls:McuOverlay Target="{Binding ElementName=ImageView}" />
 
             <TextBlock Text="Open a JPEG file, or drop one here."

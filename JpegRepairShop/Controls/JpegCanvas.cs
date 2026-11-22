@@ -53,6 +53,16 @@ public sealed class JpegCanvas : SKElement
         nameof(HighlightProblems), typeof(bool), typeof(JpegCanvas),
         new FrameworkPropertyMetadata(true, FrameworkPropertyMetadataOptions.AffectsRender));
 
+    /// <summary>MCUs found by bad-MCU detection; drawn in orange when <see cref="HighlightProblems"/> is on.</summary>
+    public static readonly DependencyProperty BadMcusProperty = DependencyProperty.Register(
+        nameof(BadMcus), typeof(BadMcuMap), typeof(JpegCanvas),
+        new FrameworkPropertyMetadata(null, FrameworkPropertyMetadataOptions.AffectsRender));
+
+    /// <summary>The section to outline (see <see cref="JpegDocument.FindSection"/>), or null.</summary>
+    public static readonly DependencyProperty SectionProperty = DependencyProperty.Register(
+        nameof(Section), typeof(McuSection?), typeof(JpegCanvas),
+        new PropertyMetadata(null, (d, _) => ((JpegCanvas)d).OverlayChanged?.Invoke(d, EventArgs.Empty)));
+
     private static readonly DependencyPropertyKey ZoomPropertyKey = DependencyProperty.RegisterReadOnly(
         nameof(Zoom), typeof(double), typeof(JpegCanvas), new PropertyMetadata(1.0));
 
@@ -64,6 +74,8 @@ public sealed class JpegCanvas : SKElement
     private static readonly SKPaint GridPaint = new() { Color = new SKColor(255, 255, 255, 45), Style = SKPaintStyle.Stroke, StrokeWidth = 0 };
     private static readonly SKPaint BorderPaint = new() { Color = new SKColor(255, 255, 255, 90), Style = SKPaintStyle.Stroke, StrokeWidth = 0 };
     private static readonly SKPaint CorruptFill = new() { Color = new SKColor(255, 40, 40, 110), Style = SKPaintStyle.Fill };
+    private static readonly SKPaint BadFill = new() { Color = new SKColor(255, 150, 0, 120), Style = SKPaintStyle.Fill };
+    private static readonly SKPaint BadOutline = new() { Color = new SKColor(255, 170, 0, 220), Style = SKPaintStyle.Stroke, StrokeWidth = 0 };
     private static readonly SKPaint BlankFill = new() { Color = new SKColor(60, 140, 255, 110), Style = SKPaintStyle.Fill };
     private static readonly SKPaint MissingFill = new() { Color = new SKColor(255, 60, 60, 60), Style = SKPaintStyle.Fill };
     private static readonly SKPaint MissingCross = new() { Color = new SKColor(255, 80, 80, 140), Style = SKPaintStyle.Stroke, StrokeWidth = 0 };
@@ -129,6 +141,18 @@ public sealed class JpegCanvas : SKElement
         set => SetValue(HighlightProblemsProperty, value);
     }
 
+    public BadMcuMap? BadMcus
+    {
+        get => (BadMcuMap?)GetValue(BadMcusProperty);
+        set => SetValue(BadMcusProperty, value);
+    }
+
+    public McuSection? Section
+    {
+        get => (McuSection?)GetValue(SectionProperty);
+        set => SetValue(SectionProperty, value);
+    }
+
     /// <summary>Image pixels per DIP.</summary>
     public double Zoom
     {
@@ -163,6 +187,9 @@ public sealed class JpegCanvas : SKElement
         double h = Math.Min(frame.McuHeight, frame.Height - row * frame.McuHeight);
         return new Rect(_offsetX + col * frame.McuWidth * Zoom, _offsetY + row * frame.McuHeight * Zoom, w * Zoom, h * Zoom);
     }
+
+    /// <summary>A point of the image (in image pixels) in this control's coordinates (DIPs).</summary>
+    public Point ImageToView(double x, double y) => new(_offsetX + x * Zoom, _offsetY + y * Zoom);
 
     /// <summary>Rebuilds the picture from the document's pixel cache (after loading or an edit), keeping the view.</summary>
     public void RefreshImage()
@@ -461,15 +488,27 @@ public sealed class JpegCanvas : SKElement
 
         if (HighlightProblems && cellW >= 2)
         {
+            var bad = BadMcus;
             for (int row = row0; row <= row1; row++)
             {
                 for (int col = col0; col <= col1; col++)
                 {
-                    var status = doc.GetStatus(row * frame.McusPerRow + col);
-                    if (status == McuStatus.Ok)
-                        continue;
-
+                    int index = row * frame.McusPerRow + col;
+                    var status = doc.GetStatus(index);
                     var r = SKRect.Create(ox + col * cellW, oy + row * cellH, cellW, cellH);
+                    if (status == McuStatus.Ok)
+                    {
+                        // Detected: doesn't fit 2 or more of its neighbours (decoder found nothing wrong).
+                        if (bad?.IsBad(index) == true)
+                        {
+                            canvas.DrawRect(r, BadFill);
+                            if (cellW >= 6)
+                                canvas.DrawRect(r, BadOutline);
+                        }
+
+                        continue;
+                    }
+
                     if (status == McuStatus.Corrupt)
                     {
                         canvas.DrawRect(r, CorruptFill);

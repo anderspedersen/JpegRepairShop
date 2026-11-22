@@ -80,12 +80,30 @@ public sealed partial class MainViewModel : ObservableObject
     private bool _showGrid = true;
 
     [ObservableProperty]
-    private bool _highlightProblems = true;
+    private bool _highlightProblems;
+
+    /// <summary>Outline the section around the selected MCU.</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(ShownSection))]
+    private bool _showSection;
+
+    /// <summary>The section around the selected MCU (good MCUs in read order, see JpegDocument.FindSection), or null.</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(SelectedInfo), nameof(ShownSection))]
+    [NotifyCanExecuteChangedFor(nameof(FixSectionColorsCommand))]
+    private McuSection? _section;
+
+    public McuSection? ShownSection => ShowSection ? Section : null;
+
+    /// <summary>MCUs that look bad (2+ rugged edges to their neighbours, one of them above or below).</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(Summary), nameof(SelectedInfo), nameof(HoverInfo))]
+    private BadMcuMap? _badMcus;
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(ShowWelcome))]
     [NotifyCanExecuteChangedFor(nameof(InsertBlankCommand), nameof(RemoveMcuCommand), nameof(FixColorsCommand),
-        nameof(FixAllCommand), nameof(UndoCommand), nameof(RedoCommand))]
+        nameof(FixSectionColorsCommand), nameof(FixAllCommand), nameof(UndoCommand), nameof(RedoCommand))]
     private bool _isBusy;
 
     /// <summary>Text shown while <see cref="IsBusy"/>.</summary>
@@ -169,13 +187,25 @@ public sealed partial class MainViewModel : ObservableObject
                 text += $"   ·   blank {blank}";
             if (doc.OverflowCount > 0)
                 text += $"   ·   overflow {doc.OverflowCount}";
+            if (BadMcus != null)
+                text += $"   ·   looks bad {BadMcus.Count}";
             if (doc.File.RestartInterval > 0)
                 text += $"   ·   restart every {doc.File.RestartInterval} MCUs";
             return text;
         }
     }
 
-    public string SelectedInfo => Describe(SelectedMcu, includeDc: false); // DC values are shown in the DC editor
+    // DC values are shown in the DC editor.
+    public string SelectedInfo
+    {
+        get
+        {
+            string text = Describe(SelectedMcu, includeDc: false);
+            if (text.Length > 0 && Section is { } section)
+                text += $"\nSection: MCUs {section.First}–{section.Last} ({section.Count} MCUs)";
+            return text;
+        }
+    }
 
     public string HoverInfo => Describe(HoverMcu, includeDc: true);
 
@@ -327,6 +357,28 @@ public sealed partial class MainViewModel : ObservableObject
     private bool HasSelection() => !IsBusy && Document is { } doc && SelectedMcu >= 0 && SelectedMcu < doc.Frame.McuCount;
 
     private bool CanFixColors() => HasSelection() && SelectedMcu >= Document!.Frame.McusPerRow;
+
+    private bool CanFixSectionColors() => HasSelection() && Section is { First: > 0 };
+
+    [RelayCommand(CanExecute = nameof(CanFixSectionColors))]
+    private void FixSectionColors()
+    {
+        var doc = Document!;
+        (McuSection Section, int[] Deltas)? result = null;
+        long ms = Timed(() => result = doc.FixSectionColours(SelectedMcu));
+        if (result is not { } fixedSection)
+        {
+            StatusMessage = "No good MCUs before this section to compare its colours with.";
+            return;
+        }
+
+        var (section, deltas) = fixedSection;
+        var names = ComponentNames(doc.Frame);
+        StatusMessage = deltas.Any(d => d != 0)
+            ? $"Section colours corrected from MCU {section.First}: " +
+              string.Join(", ", deltas.Select((d, c) => $"{names[c]} {d:+0;-0;0}")) + $" DC steps. ({ms} ms)"
+            : $"The colours of section {section.First}–{section.Last} already match the MCUs before it.";
+    }
 
     private bool CanUndo() => !IsBusy && Document?.CanUndo == true;
 
@@ -486,10 +538,26 @@ public sealed partial class MainViewModel : ObservableObject
         }
     }
 
-    partial void OnSelectedMcuChanged(int value) => RefreshDcChannels();
+    partial void OnSelectedMcuChanged(int value)
+    {
+        RefreshDcChannels();
+        RefreshSection();
+    }
+
+    private void RefreshSection() => Section = Document is { } doc && SelectedMcu >= 0 ? doc.FindSection(SelectedMcu) : null;
+
+    /// <summary>Re-runs bad-MCU detection (after loading and every edit, undo and redo).</summary>
+    private void RefreshBadMcus()
+    {
+        var watch = Stopwatch.StartNew();
+        BadMcus = Document?.FindBadMcus();
+        RefreshSection();
+        Debug.WriteLine($"Bad-MCU detection: {watch.ElapsedMilliseconds} ms");
+    }
 
     private void OnDocumentEdited(object? sender, int firstMcu)
     {
+        RefreshBadMcus();
         Revision++;
         OnPropertyChanged(nameof(Summary));
         OnPropertyChanged(nameof(SelectedInfo));
@@ -518,6 +586,7 @@ public sealed partial class MainViewModel : ObservableObject
         }
 
         RefreshDcChannels();
+        RefreshBadMcus();
 
         OnPropertyChanged(nameof(UndoToolTip));
         OnPropertyChanged(nameof(RedoToolTip));
@@ -526,6 +595,7 @@ public sealed partial class MainViewModel : ObservableObject
         InsertBlankCommand.NotifyCanExecuteChanged();
         RemoveMcuCommand.NotifyCanExecuteChanged();
         FixColorsCommand.NotifyCanExecuteChanged();
+        FixSectionColorsCommand.NotifyCanExecuteChanged();
         FixAllCommand.NotifyCanExecuteChanged();
     }
 
@@ -556,6 +626,7 @@ public sealed partial class MainViewModel : ObservableObject
                 var loaded = JpegDocument.Load(path);
                 long decoded = watch.ElapsedMilliseconds;
                 loaded.EnsureRendered();
+                loaded.FindBadMcus(); // cached; the UI thread then gets it for free
                 return (loaded, decoded, watch.ElapsedMilliseconds - decoded);
             });
 
@@ -798,6 +869,8 @@ public sealed partial class MainViewModel : ObservableObject
 
         int fileOffset = doc.File.Entropy.ToSourceOffset((int)(mcu.BitOffset >> 3));
         text += $"{mcu.Status}, originally MCU {mcu.SourceIndex}, {mcu.BitLength} bits at file offset 0x{fileOffset:X}";
+        if (BadMcus?.IsBad(index) == true)
+            text += $"\nLooks bad: rugged edge {DescribeEdges(BadMcus.RuggedEdges(index))}";
         if (!includeDc)
             return text;
         text += "\n";
@@ -819,6 +892,16 @@ public sealed partial class MainViewModel : ObservableObject
         }
 
         return text + "DC  " + string.Join("   ", parts);
+    }
+
+    private static string DescribeEdges(byte edges)
+    {
+        var names = new List<string>(4);
+        if ((edges & BadMcuMap.Top) != 0) names.Add("above");
+        if ((edges & BadMcuMap.Right) != 0) names.Add("right");
+        if ((edges & BadMcuMap.Bottom) != 0) names.Add("below");
+        if ((edges & BadMcuMap.Left) != 0) names.Add("left");
+        return string.Join(", ", names);
     }
 
     private static string[] ComponentNames(FrameHeader frame) => frame.Components.Count switch
