@@ -113,8 +113,10 @@
                 <Button Style="{StaticResource IconOnlyButton}" Content="&#xE7A6;" Command="{Binding RedoCommand}" ToolTip="{Binding RedoToolTip}" ToolTipService.ShowOnDisabled="True" AutomationProperties.Name="Redo" />
                 <Separator />
                 <CheckBox Content="MCU grid" IsChecked="{Binding ShowGrid}" Margin="2,0" />
+                <CheckBox Content="Section" IsChecked="{Binding ShowSection}" Margin="8,0,2,0"
+                          ToolTip="Outline (cyan) the section around the selected MCU: the good MCUs before and after it in read order, up to the first bad one (corrupt, missing, blank or orange)" />
                 <CheckBox Content="Highlight problems" IsChecked="{Binding HighlightProblems}" Margin="8,0,2,0"
-                          ToolTip="Red = invalid data in this MCU, faint red with cross = not decoded (data ran out), blue = blank MCU you inserted" />
+                          ToolTip="Red = invalid data in this MCU, faint red with cross = not decoded (data ran out), blue = blank MCU you inserted, orange = looks bad (doesn't fit 2 or more of its neighbours)" />
                 <Separator />
                 <Button Style="{StaticResource IconButton}" Tag="&#xE9A6;" Content="Fit" Click="OnFitClick" ToolTip="Fit image to window (Ctrl+0)" />
                 <Button Style="{StaticResource IconButton}" Tag="&#xE71E;" Content="1:1" Click="OnActualSizeClick" ToolTip="Actual size (Ctrl+1)" />
@@ -211,7 +213,9 @@
                                  SelectedMcu="{Binding SelectedMcu}"
                                  HoverMcu="{Binding HoverMcu}"
                                  ShowGrid="{Binding ShowGrid}"
-                                 HighlightProblems="{Binding HighlightProblems}" />
+                                 HighlightProblems="{Binding HighlightProblems}"
+                                 BadMcus="{Binding BadMcus}"
+                                 Section="{Binding ShownSection}" />
             <controls:McuOverlay Target="{Binding ElementName=ImageView}" />
 
             <TextBlock Text="Open a JPEG file, or drop one here."

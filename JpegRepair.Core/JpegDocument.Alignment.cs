@@ -44,18 +44,11 @@ public sealed record MisalignmentResult(int Index, AlignmentEstimate? Estimate, 
 /// while a wrong alignment spreads the differences out. Brightness counts fully and colour (Cb, Cr) at half weight;
 /// buckets are 8 levels wide (or one DC step, if wider).
 ///
-/// Close calls are settled by where line starts land (the user's seam idea): neighbouring MCUs in the stream normally
+/// Close calls are settled by where line starts land: neighbouring MCUs in the stream normally
 /// join smoothly from left to right, except where the second one is really the first MCU of the next line. So every
 /// left-right seam is scored (how badly the right edge of one MCU meets the left edge of the next), and a shift gets a
 /// small bonus (at most <see cref="SeamWeight"/>) if it puts the unusually bad seams of the next <see cref="SeamRows"/>
 /// row at column 0. The bonus only chooses the shift; whether a place counts as damaged depends on the fit alone.
-/// Validated with the Python mirror on real photos with up to 4 damages close together (true shift known):
-/// 1018 → 1035 of 1320 right (3 rows: 1026); single damages 405 → 414 of 440. On its own the seam score is right
-/// only about half the time.
-///
-/// Checked with a Python mirror on damaged versions of the sample photos (deleted bytes, tolerant decoding):
-/// the shift at a known place was right in 65/65 cases, and the automatic search found fixes that were never
-/// clearly worse than the ideal one (50 cases). Undamaged pictures give no result (largest spurious improvement 0.007).
 /// </summary>
 public sealed partial class JpegDocument
 {
@@ -90,8 +83,8 @@ public sealed partial class JpegDocument
     private const double LineStartFitTolerance = 0.05;
 
     /// <summary>
-    /// MCU rows after the place whose seams are used for the line-start score. One row did best when more damage
-    /// follows close by (more rows then pick up the next damage's line starts) and as well as more rows otherwise.
+    /// MCU rows after the place whose seams are used for the line-start score. More rows would pick up the line starts of
+    /// the next damage when it follows close by.
     /// </summary>
     private const int SeamRows = 1;
 
@@ -192,11 +185,15 @@ public sealed partial class JpegDocument
             shiftEdit.Apply(this);
             parts.Add(shiftEdit);
             description = shiftEdit.Description;
+
+            // Judge bad MCUs as they are after the shift: MCUs that only looked bad because they were out of place
+            // must take part in the colour estimate. Redraws the rows from here (again when the edit is recorded).
+            RenderFrom(index);
         }
 
         // After inserting, the first MCU that was moved is after the blanks; the DC edit skips blanks anyway.
         int colourIndex = Math.Min(index + Math.Max(shift, 0), _mcus.Count - 1);
-        var deltas = EstimateDcShift(colourIndex);
+        var deltas = EstimateDcShift(colourIndex, ColourFixSkips());
         if (deltas.Any(d => d != 0))
         {
             var dcEdit = new DcEdit(colourIndex, deltas, "Fix colour shift");
@@ -330,8 +327,6 @@ public sealed partial class JpegDocument
     /// only, so it scores nothing (which also means a shift starting in the first few columns is not found).</item>
     /// <item>The fix is <see cref="EstimateDcShift"/> at the start; shifts under 4 levels are left alone.</item>
     /// </list>
-    /// Checked with the Python mirror on photo.JPG: no result on the intact picture; artificial shifts of 6 levels
-    /// or more found at the exact MCU in most cases, never at a wrong place; 3 levels left alone.
     /// </summary>
     private MisalignmentResult? FindColourShift(BoundaryRows rows)
     {
@@ -1342,7 +1337,7 @@ public sealed partial class JpegDocument
                 for (int c = 0; c < components; c++)
                 {
                     var histogram = _histograms[c];
-                    // Full MCU width, also for the last MCU of a row (as validated): this makes the fit independent of
+                    // Full MCU width, also for the last MCU of a row: this makes the fit independent of
                     // the column, so it can be cached when MCUs only move.
                     int columns = _document.Frame.Components[c].H * 8;
                     int offset = offsets[c];

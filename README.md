@@ -31,6 +31,11 @@ Repair Shop shows you the blocks and lets you put them back:
 - The decoder keeps going through damaged data instead of stopping at the first error, so as much of the picture
   as possible is shown. Blocks with invalid data are marked in red, blocks with no data at all with a red cross,
   and the problems found are listed with their position in the file.
+- **Bad-MCU detection** marks blocks in orange that don't fit the picture around them: if the edges to 2 or more of
+  the 4 neighbouring blocks are rugged, and at least one of them is the edge above or below, the block is probably
+  garbage from damaged data or was inserted from elsewhere. Colour shifts and misalignment break only one edge per
+  block, so they aren't marked (except where they start). **Fix colours** and **Fix all** leave marked blocks out
+  when they work out a colour shift.
 - Zoom and pan freely, with an optional MCU grid. Enlarged previews show the block under the cursor and the
   selected block, together with their DC values.
 
