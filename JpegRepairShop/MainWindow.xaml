@@ -99,6 +99,7 @@
         <KeyBinding Key="Insert" Command="{Binding InsertBlankCommand}" />
         <KeyBinding Key="Delete" Command="{Binding RemoveMcuCommand}" />
         <KeyBinding Key="F" Command="{Binding FixColorsCommand}" />
+        <KeyBinding Key="A" Modifiers="Control+Shift" Command="{Binding FixAllCommand}" />
     </Window.InputBindings>
 
     <DockPanel>
@@ -144,13 +145,17 @@
                     <controls:McuPreview Height="130" Document="{Binding Document}" Revision="{Binding Revision}" McuIndex="{Binding SelectedMcu}" />
                     <TextBlock Text="{Binding SelectedInfo}" Style="{StaticResource Info}" />
 
+                    <TextBlock Text="Repair whole picture" Style="{StaticResource Heading}" />
+                    <Button Content="Fix all…" Command="{Binding FixAllCommand}" Padding="2,3"
+                            ToolTip="Find and fix misaligned MCUs and colour shifts in the whole picture, worst first, until nothing more is found (Ctrl+Shift+A). Shows progress and can be stopped; every fix is its own undo step." />
+
                     <TextBlock Text="Repair at selected MCU" Style="{StaticResource Heading}" />
                     <UniformGrid Columns="3">
-                        <Button Content="Insert blank" Command="{Binding InsertBlankCommand}" Margin="0,0,4,0" Padding="2,3"
+                        <Button Content="Insert blank" Command="{Binding InsertBlankCommand}" Margin="0,0,3,0" Padding="2,3"
                                 ToolTip="Insert a grey MCU here; everything after it moves right (Insert). Use when data was lost." />
-                        <Button Content="Remove" Command="{Binding RemoveMcuCommand}" Margin="2,0" Padding="2,3"
+                        <Button Content="Remove" Command="{Binding RemoveMcuCommand}" Margin="3,0,3,0" Padding="2,3"
                                 ToolTip="Remove this MCU; everything after it moves left (Delete). Use on garbage MCUs." />
-                        <Button Content="Fix colours" Command="{Binding FixColorsCommand}" Margin="4,0,0,0" Padding="2,3"
+                        <Button Content="Fix colours" Command="{Binding FixColorsCommand}" Margin="3,0,0,0" Padding="2,3"
                                 ToolTip="Match colours from here on to the MCU row above (F). Select the first MCU with wrong colours." />
                     </UniformGrid>
                     <TextBlock Text="DC from selected MCU onwards" Margin="0,10,0,0" Foreground="Gray" />
@@ -229,7 +234,7 @@
                 </Border>
             </StackPanel>
 
-            <TextBlock Text="Loading…"
+            <TextBlock Text="{Binding BusyText}"
                        Visibility="{Binding IsBusy, Converter={StaticResource BoolToVisibility}}"
                        Foreground="White" FontSize="16" IsHitTestVisible="False"
                        HorizontalAlignment="Center" VerticalAlignment="Center" />

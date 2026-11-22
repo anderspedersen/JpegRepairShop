@@ -26,6 +26,12 @@ public sealed class McuEntry
     public int SourceIndex { get; }
 
     public bool IsBlank => SourceIndex < 0;
+
+    /// <summary>
+    /// Cache for the alignment search: the MCU's edge samples computed without the DC coefficients (edits only move
+    /// MCUs and change DC, never AC, so this never goes stale). Layout: see JpegDocument.EdgeLayout.
+    /// </summary>
+    internal float[]? AcEdges;
 }
 
 /// <summary>
@@ -33,7 +39,7 @@ public sealed class McuEntry
 /// The first <see cref="FrameHeader.McuCount"/> entries are the picture; entries after that are overflow
 /// (pushed out by inserts, or decoded from data left over after the frame) and are not saved.
 /// </summary>
-public sealed class JpegDocument : IMcuSource
+public sealed partial class JpegDocument : IMcuSource
 {
     private readonly List<McuEntry> _mcus;
     private readonly Stack<Edit> _undo = new();
@@ -151,20 +157,36 @@ public sealed class JpegDocument : IMcuSource
 
     // ---- Edits -------------------------------------------------------------------------------------------
 
-    /// <summary>Inserts a flat grey MCU before <paramref name="index"/>, shifting everything after it right by one.</summary>
-    public void InsertBlank(int index)
+    /// <summary>
+    /// Inserts <paramref name="count"/> flat grey MCUs before <paramref name="index"/>, shifting everything after
+    /// them right. One undo step.
+    /// </summary>
+    public void InsertBlank(int index, int count = 1)
     {
         if (index < 0 || index > _mcus.Count)
             throw new ArgumentOutOfRangeException(nameof(index));
-        Apply(new InsertEdit(index, new McuEntry(new short[Layout.CoefficientsPerMcu], McuStatus.Blank, 0, 0, -1)));
+        if (count < 1)
+            throw new ArgumentOutOfRangeException(nameof(count));
+
+        Apply(InsertBlankEdit(index, count));
     }
 
-    /// <summary>Removes the MCU at <paramref name="index"/>, shifting everything after it left by one.</summary>
-    public void Remove(int index)
+    private Edit InsertBlankEdit(int index, int count)
+    {
+        var blanks = new McuEntry[count];
+        for (int i = 0; i < count; i++)
+            blanks[i] = new McuEntry(new short[Layout.CoefficientsPerMcu], McuStatus.Blank, 0, 0, -1);
+        return new InsertEdit(index, blanks);
+    }
+
+    /// <summary>Removes <paramref name="count"/> MCUs from <paramref name="index"/>, shifting everything after them left. One undo step.</summary>
+    public void Remove(int index, int count = 1)
     {
         if (index < 0 || index >= _mcus.Count)
             throw new ArgumentOutOfRangeException(nameof(index));
-        Apply(new RemoveEdit(index));
+        if (count < 1)
+            throw new ArgumentOutOfRangeException(nameof(count));
+        Apply(new RemoveEdit(index, Math.Min(count, _mcus.Count - index)));
     }
 
     /// <summary>
@@ -354,6 +376,12 @@ public sealed class JpegDocument : IMcuSource
     private void Apply(Edit edit)
     {
         edit.Apply(this);
+        Record(edit);
+    }
+
+    /// <summary>Adds an edit that has already been applied to the undo history and updates the picture.</summary>
+    private void Record(Edit edit)
+    {
         _undo.Push(edit);
         _redo.Clear();
         RenderFrom(edit.FirstMcu);
@@ -377,28 +405,48 @@ public sealed class JpegDocument : IMcuSource
         public abstract void Revert(JpegDocument document);
     }
 
-    private sealed class InsertEdit(int index, McuEntry entry) : Edit(index)
+    /// <summary>Several edits that are undone and redone together.</summary>
+    private sealed class CompositeEdit(string description, Edit[] parts) : Edit(parts.Min(p => p.FirstMcu))
     {
-        public override string Description => $"Insert blank MCU at {index}";
-
-        public override void Apply(JpegDocument document) => document._mcus.Insert(index, entry);
-
-        public override void Revert(JpegDocument document) => document._mcus.RemoveAt(index);
-    }
-
-    private sealed class RemoveEdit(int index) : Edit(index)
-    {
-        private McuEntry? _removed;
-
-        public override string Description => $"Remove MCU {index}";
+        public override string Description => description;
 
         public override void Apply(JpegDocument document)
         {
-            _removed = document._mcus[index];
-            document._mcus.RemoveAt(index);
+            foreach (var part in parts)
+                part.Apply(document);
         }
 
-        public override void Revert(JpegDocument document) => document._mcus.Insert(index, _removed!);
+        public override void Revert(JpegDocument document)
+        {
+            for (int i = parts.Length - 1; i >= 0; i--)
+                parts[i].Revert(document);
+        }
+    }
+
+    private sealed class InsertEdit(int index, McuEntry[] entries) : Edit(index)
+    {
+        public override string Description => entries.Length == 1
+            ? $"Insert blank MCU at {index}"
+            : $"Insert {entries.Length} blank MCUs at {index}";
+
+        public override void Apply(JpegDocument document) => document._mcus.InsertRange(index, entries);
+
+        public override void Revert(JpegDocument document) => document._mcus.RemoveRange(index, entries.Length);
+    }
+
+    private sealed class RemoveEdit(int index, int count) : Edit(index)
+    {
+        private McuEntry[]? _removed;
+
+        public override string Description => count == 1 ? $"Remove MCU {index}" : $"Remove {count} MCUs from {index}";
+
+        public override void Apply(JpegDocument document)
+        {
+            _removed = document._mcus.GetRange(index, count).ToArray();
+            document._mcus.RemoveRange(index, count);
+        }
+
+        public override void Revert(JpegDocument document) => document._mcus.InsertRange(index, _removed!);
     }
 
     private sealed class DcEdit(int fromIndex, int[] deltas, string name = "Adjust DC") : Edit(fromIndex)

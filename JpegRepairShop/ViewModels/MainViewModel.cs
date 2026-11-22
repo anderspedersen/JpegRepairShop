@@ -84,7 +84,13 @@ public sealed partial class MainViewModel : ObservableObject
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(ShowWelcome))]
+    [NotifyCanExecuteChangedFor(nameof(InsertBlankCommand), nameof(RemoveMcuCommand), nameof(FixColorsCommand),
+        nameof(FixAllCommand), nameof(UndoCommand), nameof(RedoCommand))]
     private bool _isBusy;
+
+    /// <summary>Text shown while <see cref="IsBusy"/>.</summary>
+    [ObservableProperty]
+    private string _busyText = "Loading…";
 
     [ObservableProperty]
     private IssueItem? _selectedIssue;
@@ -318,13 +324,114 @@ public sealed partial class MainViewModel : ObservableObject
         return watch.ElapsedMilliseconds;
     }
 
-    private bool HasSelection() => Document is { } doc && SelectedMcu >= 0 && SelectedMcu < doc.Frame.McuCount;
+    private bool HasSelection() => !IsBusy && Document is { } doc && SelectedMcu >= 0 && SelectedMcu < doc.Frame.McuCount;
 
     private bool CanFixColors() => HasSelection() && SelectedMcu >= Document!.Frame.McusPerRow;
 
-    private bool CanUndo() => Document?.CanUndo == true;
+    private bool CanUndo() => !IsBusy && Document?.CanUndo == true;
 
-    private bool CanRedo() => Document?.CanRedo == true;
+    private bool CanRedo() => !IsBusy && Document?.CanRedo == true;
+
+    private bool CanFixAll() => !IsBusy && Document is { } doc && doc.Frame.McuRows > 1;
+
+    /// <summary>Most fixes "Fix all" applies before giving up (a safety net; real pictures need far fewer).</summary>
+    private const int MaxAutomaticFixes = 1000;
+
+    /// <summary>
+    /// Repairs the whole picture: repeatedly finds the worst damage (misalignment, or a colour shift on its own) and
+    /// fixes it (inserts or removes MCUs and fixes the colours), until nothing more is found. Shows progress in a
+    /// window that can stop it. Every fix is its own undo step.
+    /// </summary>
+    [RelayCommand(CanExecute = nameof(CanFixAll))]
+    private void FixAll()
+    {
+        var doc = Document!;
+        var window = new FixAllWindow { Owner = Application.Current.MainWindow };
+        var watch = Stopwatch.StartNew();
+        int fixes = 0;
+        string reason = "nothing more found";
+
+        window.Loaded += async (_, _) =>
+        {
+            try
+            {
+                var applied = new HashSet<string>();
+                while (true)
+                {
+                    if (window.Token.IsCancellationRequested)
+                    {
+                        reason = "stopped";
+                        break;
+                    }
+
+                    if (fixes >= MaxAutomaticFixes)
+                    {
+                        reason = $"stopped after {MaxAutomaticFixes} fixes";
+                        break;
+                    }
+
+                    window.ShowSearching(fixes);
+                    var result = await Task.Run(doc.FindMisalignment);
+                    if (result == null)
+                        break;
+                    if (window.Token.IsCancellationRequested)
+                    {
+                        reason = "stopped";
+                        break;
+                    }
+
+                    // The same fix at the same place again would go round in circles.
+                    string key = $"{result.Index}:{result.Shift}:{string.Join(",", result.ColourFix ?? Array.Empty<int>())}";
+                    if (!applied.Add(key))
+                    {
+                        reason = "the same fix came up again";
+                        break;
+                    }
+
+                    var colourFix = doc.AlignAndFixColors(result.Index, result.Shift);
+                    SelectedMcu = result.Index;
+                    fixes++;
+                    window.AddFix(fixes, DescribeFix(doc, result, colourFix));
+                }
+            }
+            catch (Exception ex)
+            {
+                reason = "failed: " + ex.Message;
+            }
+            finally
+            {
+                window.Finish();
+            }
+        };
+
+        window.ShowDialog();
+
+        string summary = fixes switch
+        {
+            0 => "no fixes applied",
+            1 => "1 fix applied (undo with Ctrl+Z)",
+            _ => $"{fixes} fixes applied (each is a separate undo step)",
+        };
+        StatusMessage = $"Fix all: {summary}; {reason}. ({watch.Elapsed.TotalSeconds:0.0} s)";
+    }
+
+    private static string DescribeFix(JpegDocument doc, MisalignmentResult result, IReadOnlyList<int> colourFix)
+    {
+        var frame = doc.Frame;
+        int shift = result.Shift;
+        string where = $"MCU {result.Index} (column {result.Index % frame.McusPerRow}, row {result.Index / frame.McusPerRow})";
+        string colours = colourFix.Any(d => d != 0)
+            ? $"colours fixed (DC {string.Join(", ", colourFix.Select(d => d.ToString("+0;-0;0")))})"
+            : "colours already matched";
+        if (result.Estimate is { } estimate && shift != 0)
+        {
+            string what = shift > 0 ? $"inserted {shift} blank MCU(s)" : $"removed {-shift} MCU(s)";
+            string how = result.FromLineStarts ? " (found from where lines start; the row above was unusable)" : "";
+            return $"Misalignment at {where}: {what}, fit {estimate.FitWithoutShift:P0} → {estimate.Fit:P0}{how}; {colours}";
+        }
+
+        return $"Colour shift at {where}: {colours}";
+    }
 
     internal void NudgeDc(int component, int delta)
     {
@@ -419,6 +526,7 @@ public sealed partial class MainViewModel : ObservableObject
         InsertBlankCommand.NotifyCanExecuteChanged();
         RemoveMcuCommand.NotifyCanExecuteChanged();
         FixColorsCommand.NotifyCanExecuteChanged();
+        FixAllCommand.NotifyCanExecuteChanged();
     }
 
     partial void OnSelectedIssueChanged(IssueItem? value)

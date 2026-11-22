@@ -149,6 +149,220 @@ public class DocumentTests
         Assert.Empty(JpegDocument.Decode(saved).Scan.Issues);
     }
 
+    private static int AlignmentTestIndex(JpegDocument doc) => 40 * doc.Frame.McusPerRow + 37; // row 40, column 37
+
+    [Fact]
+    public void Alignment_finds_how_many_mcus_are_missing()
+    {
+        var doc = LoadPhoto(out _);
+        int index = AlignmentTestIndex(doc);
+        doc.Remove(index, 7); // as if the data of 7 MCUs was lost
+
+        var estimate = doc.EstimateAlignment(index);
+
+        Assert.NotNull(estimate);
+        Assert.Equal(7, estimate.Shift); // insert 7
+        Assert.True(estimate.Fit > estimate.FitWithoutShift + 0.2, $"fit {estimate.Fit:P0} vs {estimate.FitWithoutShift:P0}");
+    }
+
+    [Fact]
+    public void Alignment_finds_how_many_mcus_are_extra()
+    {
+        var doc = LoadPhoto(out _);
+        int index = AlignmentTestIndex(doc);
+        doc.InsertBlank(index, 5);
+
+        var estimate = doc.EstimateAlignment(index);
+
+        Assert.NotNull(estimate);
+        Assert.Equal(-5, estimate.Shift); // remove 5
+    }
+
+    [Fact]
+    public void Intact_row_needs_no_alignment()
+    {
+        var doc = LoadPhoto(out _);
+
+        var estimate = doc.EstimateAlignment(AlignmentTestIndex(doc));
+
+        Assert.NotNull(estimate);
+        Assert.Equal(0, estimate.Shift);
+    }
+
+    [Fact]
+    public void First_row_cannot_be_aligned()
+    {
+        var doc = LoadPhoto(out _);
+        Assert.Null(doc.EstimateAlignment(10));
+    }
+
+    [Fact]
+    public void Auto_align_fixes_the_shift_in_one_undo_step()
+    {
+        var doc = LoadPhoto(out var original);
+        int index = AlignmentTestIndex(doc);
+        doc.Remove(index, 7);
+        var damaged = doc.Save();
+
+        var estimate = doc.AutoAlign(index);
+
+        Assert.Equal(7, estimate?.Shift);
+        Assert.Equal(McuStatus.Blank, doc.GetStatus(index + 6));
+        Assert.Equal(index + 7, doc[index + 7].SourceIndex); // everything after the gap is back in place
+        doc.Undo();
+        Assert.Equal(damaged, doc.Save());
+        doc.Undo();
+        Assert.Equal(original, doc.Save());
+    }
+
+    [Fact]
+    public void Find_misalignment_locates_missing_mcus()
+    {
+        var doc = LoadPhoto(out _);
+        int index = AlignmentTestIndex(doc);
+        doc.Remove(index, 7);
+
+        var result = doc.FindMisalignment();
+
+        Assert.NotNull(result);
+        Assert.Equal(index, result.Index);
+        Assert.Equal(7, result.Shift);
+    }
+
+    [Fact]
+    public void Find_misalignment_locates_extra_mcus()
+    {
+        var doc = LoadPhoto(out _);
+        int index = AlignmentTestIndex(doc);
+        doc.InsertBlank(index, 5);
+
+        var result = doc.FindMisalignment();
+
+        Assert.NotNull(result);
+        Assert.Equal(index, result.Index);
+        Assert.Equal(-5, result.Shift);
+    }
+
+    [Fact]
+    public void Intact_picture_has_no_misalignment()
+    {
+        var doc = LoadPhoto(out _);
+        Assert.Null(doc.FindMisalignment());
+    }
+
+    [Fact]
+    public void Find_and_align_fixes_the_shift_in_one_undo_step()
+    {
+        var doc = LoadPhoto(out var original);
+        doc.Remove(AlignmentTestIndex(doc), 7);
+        var damaged = doc.Save();
+
+        var result = doc.FindAndAlign();
+
+        Assert.Equal(7, result?.Shift);
+        doc.Undo();
+        Assert.Equal(damaged, doc.Save());
+        doc.Undo();
+        Assert.Equal(original, doc.Save());
+    }
+
+    [Fact]
+    public void Find_and_align_also_fixes_the_colour_shift()
+    {
+        var doc = LoadPhoto(out _);
+        int index = AlignmentTestIndex(doc);
+        doc.Remove(index, 7);
+        doc.AdjustDc(index, [20, -6, 9]); // the broken DC prediction after lost data
+        var damaged = doc.Save();
+
+        var result = doc.FindAndAlign();
+
+        Assert.NotNull(result);
+        Assert.Equal(index, result.Index);
+        Assert.Equal(7, result.Shift);
+        Assert.Equal(new[] { -20, 6, -9 }, result.ColourFix);
+        Assert.Equal(index + 7, doc[index + 7].SourceIndex);
+        for (int b = 0; b < doc.Layout.BlocksPerMcu; b++) // DC is back to the decoded values
+            Assert.Equal(0, doc.GetDcChange(index + 7, b));
+        doc.Undo(); // one step
+        Assert.Equal(damaged, doc.Save());
+    }
+
+    [Fact]
+    public void Find_and_align_fixes_a_colour_shift_without_misalignment()
+    {
+        var doc = LoadPhoto(out var original);
+        int index = AlignmentTestIndex(doc);
+        doc.AdjustDc(index, [20, -6, 9]);
+        var damaged = doc.Save();
+
+        var result = doc.FindAndAlign();
+
+        Assert.NotNull(result);
+        Assert.Equal(index, result.Index);
+        Assert.Equal(0, result.Shift);
+        Assert.Equal(new[] { -20, 6, -9 }, result.ColourFix);
+        Assert.Equal(original, doc.Save());
+        Assert.Null(doc.FindMisalignment()); // nothing left to fix
+        doc.Undo(); // one step
+        Assert.Equal(damaged, doc.Save());
+    }
+
+    [Fact]
+    public void Colour_only_shift_in_chroma_is_found()
+    {
+        var doc = LoadPhoto(out _);
+        int index = AlignmentTestIndex(doc);
+        doc.AdjustDc(index, [0, 0, 12]);
+
+        var result = doc.FindMisalignment();
+
+        Assert.NotNull(result);
+        Assert.Equal(index, result.Index);
+        Assert.Equal(new[] { 0, 0, -12 }, result.ColourFix);
+    }
+
+    [Fact]
+    public void Small_colour_differences_are_left_alone()
+    {
+        var doc = LoadPhoto(out _);
+        doc.AdjustDc(AlignmentTestIndex(doc), [5, 0, 0]); // 5 DC steps = about 3 levels in photo.JPG
+
+        Assert.Null(doc.FindMisalignment());
+    }
+
+    [Fact]
+    public void Search_with_a_warm_cache_gives_the_same_result_as_a_fresh_one()
+    {
+        static JpegDocument Damaged(out int perRow)
+        {
+            var doc = LoadPhoto(out _);
+            perRow = doc.Frame.McusPerRow;
+            doc.Remove(AlignmentTestIndex(doc), 7);
+            doc.InsertBlank(AlignmentTestIndex(doc) + 30 * perRow, 3);
+            return doc;
+        }
+
+        // Warm: search, fix, search again (the second search reuses what the first one computed).
+        var warm = Damaged(out _);
+        var first = warm.FindMisalignment();
+        Assert.NotNull(first);
+        warm.AlignAndFixColors(first.Index, first.Shift);
+        var second = warm.FindMisalignment();
+        warm.Undo();
+        var again = warm.FindMisalignment();
+
+        // Cold: the same edits on a fresh document, nothing cached.
+        var cold = Damaged(out _);
+        cold.AlignAndFixColors(first.Index, first.Shift);
+        var secondCold = cold.FindMisalignment();
+        var firstCold = Damaged(out _).FindMisalignment();
+
+        Assert.Equal((firstCold?.Index, firstCold?.Shift), (first.Index, first.Shift));
+        Assert.Equal((secondCold?.Index, secondCold?.Shift), (second?.Index, second?.Shift));
+        Assert.Equal((first.Index, first.Shift), (again?.Index, again?.Shift)); // undo brings back the first result
+    }
+
     [Fact]
     public void Saving_clears_the_modified_flag()
     {
