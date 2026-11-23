@@ -49,14 +49,17 @@ public sealed class JpegCanvas : SKElement
         nameof(ShowGrid), typeof(bool), typeof(JpegCanvas),
         new FrameworkPropertyMetadata(true, FrameworkPropertyMetadataOptions.AffectsRender));
 
-    public static readonly DependencyProperty HighlightProblemsProperty = DependencyProperty.Register(
-        nameof(HighlightProblems), typeof(bool), typeof(JpegCanvas),
-        new FrameworkPropertyMetadata(true, FrameworkPropertyMetadataOptions.AffectsRender));
+    /// <summary>Mark bad MCUs (filled here, outlined by <see cref="McuOverlay"/>) and the other problems.</summary>
+    public static readonly DependencyProperty ShowBadMcusProperty = DependencyProperty.Register(
+        nameof(ShowBadMcus), typeof(bool), typeof(JpegCanvas),
+        new FrameworkPropertyMetadata(true, FrameworkPropertyMetadataOptions.AffectsRender,
+            (d, _) => ((JpegCanvas)d).OverlayChanged?.Invoke(d, EventArgs.Empty)));
 
-    /// <summary>MCUs found by bad-MCU detection; drawn in orange when <see cref="HighlightProblems"/> is on.</summary>
+    /// <summary>MCUs found by bad-MCU detection; drawn in orange when <see cref="ShowBadMcus"/> is on.</summary>
     public static readonly DependencyProperty BadMcusProperty = DependencyProperty.Register(
         nameof(BadMcus), typeof(BadMcuMap), typeof(JpegCanvas),
-        new FrameworkPropertyMetadata(null, FrameworkPropertyMetadataOptions.AffectsRender));
+        new FrameworkPropertyMetadata(null, FrameworkPropertyMetadataOptions.AffectsRender,
+            (d, _) => ((JpegCanvas)d).OverlayChanged?.Invoke(d, EventArgs.Empty)));
 
     /// <summary>The section to outline (see <see cref="JpegDocument.FindSection"/>), or null.</summary>
     public static readonly DependencyProperty SectionProperty = DependencyProperty.Register(
@@ -76,6 +79,8 @@ public sealed class JpegCanvas : SKElement
     private static readonly SKPaint CorruptFill = new() { Color = new SKColor(255, 40, 40, 110), Style = SKPaintStyle.Fill };
     private static readonly SKPaint BadFill = new() { Color = new SKColor(255, 150, 0, 120), Style = SKPaintStyle.Fill };
     private static readonly SKPaint BadOutline = new() { Color = new SKColor(255, 170, 0, 220), Style = SKPaintStyle.Stroke, StrokeWidth = 0 };
+    private static readonly SKPaint NotBadOutline = new() { Color = new SKColor(255, 170, 0, 110), Style = SKPaintStyle.Stroke, StrokeWidth = 0, PathEffect = SKPathEffect.CreateDash([2f, 2f], 0) };
+    private static readonly SKPaint FilledFill = new() { Color = new SKColor(60, 220, 120, 70), Style = SKPaintStyle.Fill };
     private static readonly SKPaint BlankFill = new() { Color = new SKColor(60, 140, 255, 110), Style = SKPaintStyle.Fill };
     private static readonly SKPaint MissingFill = new() { Color = new SKColor(255, 60, 60, 60), Style = SKPaintStyle.Fill };
     private static readonly SKPaint MissingCross = new() { Color = new SKColor(255, 80, 80, 140), Style = SKPaintStyle.Stroke, StrokeWidth = 0 };
@@ -135,10 +140,10 @@ public sealed class JpegCanvas : SKElement
         set => SetValue(ShowGridProperty, value);
     }
 
-    public bool HighlightProblems
+    public bool ShowBadMcus
     {
-        get => (bool)GetValue(HighlightProblemsProperty);
-        set => SetValue(HighlightProblemsProperty, value);
+        get => (bool)GetValue(ShowBadMcusProperty);
+        set => SetValue(ShowBadMcusProperty, value);
     }
 
     public BadMcuMap? BadMcus
@@ -486,7 +491,7 @@ public sealed class JpegCanvas : SKElement
         canvas.Save();
         canvas.ClipRect(imageRect);
 
-        if (HighlightProblems && cellW >= 2)
+        if (ShowBadMcus && cellW >= 2)
         {
             var bad = BadMcus;
             for (int row = row0; row <= row1; row++)
@@ -496,14 +501,22 @@ public sealed class JpegCanvas : SKElement
                     int index = row * frame.McusPerRow + col;
                     var status = doc.GetStatus(index);
                     var r = SKRect.Create(ox + col * cellW, oy + row * cellH, cellW, cellH);
-                    if (status == McuStatus.Ok)
+                    if (status is McuStatus.Ok or McuStatus.Filled)
                     {
+                        if (status == McuStatus.Filled)
+                            canvas.DrawRect(r, FilledFill);
+
                         // Detected: doesn't fit 2 or more of its neighbours (decoder found nothing wrong).
                         if (bad?.IsBad(index) == true)
                         {
                             canvas.DrawRect(r, BadFill);
                             if (cellW >= 6)
                                 canvas.DrawRect(r, BadOutline);
+                        }
+                        else if (cellW >= 6 && bad?.Mark(index) == McuMark.NotBad)
+                        {
+                            // Flagged, but marked as not bad by the user.
+                            canvas.DrawRect(r, NotBadOutline);
                         }
 
                         continue;

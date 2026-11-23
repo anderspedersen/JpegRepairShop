@@ -12,6 +12,9 @@ public enum McuStatus : byte
 
     /// <summary>An empty (flat grey) MCU inserted by an edit.</summary>
     Blank = 3,
+
+    /// <summary>Contents made up from the picture around it by an edit (see <see cref="JpegDocument.PrepareFill"/>).</summary>
+    Filled = 4,
 }
 
 public struct McuInfo

@@ -21,6 +21,8 @@ Repair Shop shows you the blocks and lets you put them back:
 - **Fix section colours**: for when the edges don't line up (garbage or misaligned rows above). Matches the colour
   histogram of the selected section (the run of good blocks around the selected one) to the good blocks just before
   it, and corrects the colours from the section's first block onwards.
+- **Fill bad MCUs**: replaces bad, corrupt and blank blocks with contents made up from the picture
+  around them. Filled blocks are marked in green. Best done last, after the blocks are back in place and the colours are right.
 - **Adjust DC by hand**: fine-tune brightness (Y) and colour (Cb, Cr) from the selected block onwards. The buttons
   speed up when held down; Shift + mouse wheel moves 10 steps at a time.
 - **Undo / redo** for every edit.
@@ -39,6 +41,9 @@ Repair Shop shows you the blocks and lets you put them back:
   garbage from damaged data or was inserted from elsewhere. Colour shifts and misalignment break only one edge per
   block, so they aren't marked (except where they start). **Fix colours** and **Fix all** leave marked blocks out
   when they work out a colour shift.
+  You can override the detection for any block: mark it as bad, or as not bad (B flips it); marks stay until you
+  change them. With **Show bad MCUs** on, every group of blocks that needs repair (bad, corrupt, inserted or missing)
+  is outlined in orange.
 - Zoom and pan freely, with an optional MCU grid. Enlarged previews show the block under the cursor and the
   selected block, together with their DC values.
 
