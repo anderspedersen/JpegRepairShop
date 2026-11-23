@@ -140,7 +140,7 @@ public sealed partial class JpegDocument
         for (int i = perRow; i < count; i++)
         {
             var entry = _mcus[i];
-            if (!entry.IsBlank && entry.SourceIndex % step == 0)
+            if (!entry.IsInserted && entry.SourceIndex % step == 0)
                 coarse.Add(i);
         }
         var best = BestImprovement(rows, coarse);

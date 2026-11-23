@@ -69,7 +69,7 @@ public sealed partial class MainViewModel : ObservableObject
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(SelectedInfo))]
-    [NotifyCanExecuteChangedFor(nameof(InsertBlankCommand), nameof(RemoveMcuCommand), nameof(FixColorsCommand))]
+    [NotifyCanExecuteChangedFor(nameof(InsertBlankCommand), nameof(RemoveMcuCommand), nameof(FixColorsCommand), nameof(ToggleBadCommand))]
     private int _selectedMcu = -1;
 
     [ObservableProperty]
@@ -79,8 +79,9 @@ public sealed partial class MainViewModel : ObservableObject
     [ObservableProperty]
     private bool _showGrid = true;
 
+    /// <summary>Show bad MCUs (filled and outlined) and the other problem markings on the picture.</summary>
     [ObservableProperty]
-    private bool _highlightProblems;
+    private bool _showBadMcus;
 
     /// <summary>Outline the section around the selected MCU.</summary>
     [ObservableProperty]
@@ -98,12 +99,14 @@ public sealed partial class MainViewModel : ObservableObject
     /// <summary>MCUs that look bad (2+ rugged edges to their neighbours, one of them above or below).</summary>
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(Summary), nameof(SelectedInfo), nameof(HoverInfo))]
+    [NotifyCanExecuteChangedFor(nameof(ToggleBadCommand))]
     private BadMcuMap? _badMcus;
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(ShowWelcome))]
     [NotifyCanExecuteChangedFor(nameof(InsertBlankCommand), nameof(RemoveMcuCommand), nameof(FixColorsCommand),
-        nameof(FixSectionColorsCommand), nameof(FixAllCommand), nameof(UndoCommand), nameof(RedoCommand))]
+        nameof(FixSectionColorsCommand), nameof(FixAllCommand), nameof(UndoCommand), nameof(RedoCommand),
+        nameof(ToggleBadCommand), nameof(FillBadCommand))]
     private bool _isBusy;
 
     /// <summary>Text shown while <see cref="IsBusy"/>.</summary>
@@ -168,7 +171,7 @@ public sealed partial class MainViewModel : ObservableObject
                 return "";
 
             var frame = doc.Frame;
-            int ok = 0, corrupt = 0, missing = 0, blank = 0;
+            int ok = 0, corrupt = 0, missing = 0, blank = 0, filled = 0;
             for (int i = 0; i < frame.McuCount; i++)
             {
                 switch (doc.GetStatus(i))
@@ -176,6 +179,7 @@ public sealed partial class MainViewModel : ObservableObject
                     case McuStatus.Ok: ok++; break;
                     case McuStatus.Corrupt: corrupt++; break;
                     case McuStatus.Blank: blank++; break;
+                    case McuStatus.Filled: filled++; break;
                     default: missing++; break;
                 }
             }
@@ -185,10 +189,16 @@ public sealed partial class MainViewModel : ObservableObject
                           $"OK {ok}   ·   corrupt {corrupt}   ·   missing {missing}";
             if (blank > 0)
                 text += $"   ·   blank {blank}";
+            if (filled > 0)
+                text += $"   ·   filled {filled}";
             if (doc.OverflowCount > 0)
                 text += $"   ·   overflow {doc.OverflowCount}";
             if (BadMcus != null)
+            {
                 text += $"   ·   looks bad {BadMcus.Count}";
+                if (BadMcus.MarkCount > 0)
+                    text += $" (marked by hand: {BadMcus.MarkedBadCount} bad, {BadMcus.MarkedNotBadCount} not bad)";
+            }
             if (doc.File.RestartInterval > 0)
                 text += $"   ·   restart every {doc.File.RestartInterval} MCUs";
             return text;
@@ -467,6 +477,48 @@ public sealed partial class MainViewModel : ObservableObject
         StatusMessage = $"Fix all: {summary}; {reason}. ({watch.Elapsed.TotalSeconds:0.0} s)";
     }
 
+    // ---- Filling -------------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// Fills every bad, corrupt and blank MCU from the picture around it (exemplar-based inpainting), as one undo
+    /// step. Runs on a worker thread.
+    /// </summary>
+    [RelayCommand(CanExecute = nameof(CanFillBad))]
+    private Task FillBad() => FillAsync(Document!.FindFillTargets());
+
+    private bool CanFillBad() => !IsBusy && Document != null;
+
+    private async Task FillAsync(IReadOnlyList<int> list)
+    {
+        var doc = Document!;
+        if (list.Count == 0)
+        {
+            StatusMessage = "Nothing to fill: no bad, corrupt or blank MCUs.";
+            return;
+        }
+
+        IsBusy = true;
+        BusyText = list.Count == 1 ? "Filling 1 MCU…" : $"Filling {list.Count} MCUs…";
+        try
+        {
+            var watch = Stopwatch.StartNew();
+            var plan = await Task.Run(() => doc.PrepareFill(list));
+            int filled = doc.ApplyFill(plan);
+            StatusMessage = filled == 1
+                ? $"Filled MCU {plan.Indices[0]} from the picture around it. ({watch.Elapsed.TotalSeconds:0.0} s)"
+                : $"Filled {filled} MCUs from the picture around them, as one undo step. ({watch.Elapsed.TotalSeconds:0.0} s)";
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or JpegFormatException)
+        {
+            StatusMessage = "Fill failed: " + ex.Message;
+        }
+        finally
+        {
+            IsBusy = false;
+            BusyText = "Loading…";
+        }
+    }
+
     private static string DescribeFix(JpegDocument doc, MisalignmentResult result, IReadOnlyList<int> colourFix)
     {
         var frame = doc.Frame;
@@ -497,6 +549,101 @@ public sealed partial class MainViewModel : ObservableObject
         doc.AdjustDc(SelectedMcu, deltas, mergeWithPrevious: true);
         StatusMessage = doc.UndoDescription ?? "";
     }
+
+    // ---- Overriding bad-MCU detection ------------------------------------------------------------------
+
+    /// <summary>True if the selected MCU can be marked by hand (decoded without errors, or flagged by detection).</summary>
+    public bool CanMarkSelected => Document is { } doc && (doc.CanMark(SelectedMcu, McuMark.Bad) || doc.CanMark(SelectedMcu, McuMark.NotBad));
+
+    /// <summary>True if the selected MCU can be marked as bad (decoded without errors).</summary>
+    public bool CanMarkSelectedBad => Document?.CanMark(SelectedMcu, McuMark.Bad) == true;
+
+    /// <summary>True if the selected MCU can be marked as not bad (detection flags it).</summary>
+    public bool CanMarkSelectedNotBad => Document?.CanMark(SelectedMcu, McuMark.NotBad) == true;
+
+    /// <summary>The user's mark on the selected MCU (Auto: detection decides).</summary>
+    public McuMark SelectedMark
+    {
+        get => BadMcus?.Mark(SelectedMcu) ?? McuMark.Auto;
+        set
+        {
+            if (!IsBusy && Document is { } doc && value != SelectedMark && doc.SetMark(SelectedMcu, value))
+            {
+                StatusMessage = value switch
+                {
+                    McuMark.Bad => $"MCU {SelectedMcu} marked as bad: it ends sections and is left out of colour fixes.",
+                    McuMark.NotBad => $"MCU {SelectedMcu} marked as not bad: it counts as good for sections and colour fixes.",
+                    _ => $"MCU {SelectedMcu} is no longer marked; detection decides.",
+                };
+            }
+
+            NotifyMarkProperties();
+        }
+    }
+
+    // For the three radio buttons.
+    public bool SelectedMarkAuto
+    {
+        get => SelectedMark == McuMark.Auto;
+        set
+        {
+            if (value)
+                SelectedMark = McuMark.Auto;
+        }
+    }
+
+    public bool SelectedMarkBad
+    {
+        get => SelectedMark == McuMark.Bad;
+        set
+        {
+            if (value)
+                SelectedMark = McuMark.Bad;
+        }
+    }
+
+    public bool SelectedMarkNotBad
+    {
+        get => SelectedMark == McuMark.NotBad;
+        set
+        {
+            if (value)
+                SelectedMark = McuMark.NotBad;
+        }
+    }
+
+    private void NotifyMarkProperties()
+    {
+        OnPropertyChanged(nameof(CanMarkSelected));
+        OnPropertyChanged(nameof(CanMarkSelectedBad));
+        OnPropertyChanged(nameof(CanMarkSelectedNotBad));
+        OnPropertyChanged(nameof(SelectedMark));
+        OnPropertyChanged(nameof(SelectedMarkAuto));
+        OnPropertyChanged(nameof(SelectedMarkBad));
+        OnPropertyChanged(nameof(SelectedMarkNotBad));
+        ToggleBadCommand.NotifyCanExecuteChanged();
+    }
+
+    /// <summary>
+    /// Flips whether the selected MCU counts as bad: marks it as bad or not bad, or removes the mark when detection
+    /// already gives the wanted answer.
+    /// </summary>
+    [RelayCommand(CanExecute = nameof(CanToggleBad))]
+    private void ToggleBad()
+    {
+        if (BadMcus is not { } map)
+            return;
+        bool detected = map.IsDetected(SelectedMcu);
+        SelectedMark = map.IsBad(SelectedMcu)
+            ? detected ? McuMark.NotBad : McuMark.Auto
+            : detected ? McuMark.Auto : McuMark.Bad;
+    }
+
+    private bool CanToggleBad() => !IsBusy && CanMarkSelected;
+
+    partial void OnBadMcusChanged(BadMcuMap? value) => NotifyMarkProperties();
+
+    private void OnMarksChanged(object? sender, EventArgs e) => RefreshBadMcus();
 
     private void RefreshDcChannels()
     {
@@ -540,6 +687,7 @@ public sealed partial class MainViewModel : ObservableObject
 
     partial void OnSelectedMcuChanged(int value)
     {
+        NotifyMarkProperties();
         RefreshDcChannels();
         RefreshSection();
     }
@@ -573,9 +721,17 @@ public sealed partial class MainViewModel : ObservableObject
     partial void OnDocumentChanged(JpegDocument? oldValue, JpegDocument? newValue)
     {
         if (oldValue != null)
+        {
             oldValue.Changed -= OnDocumentEdited;
+            oldValue.MarksChanged -= OnMarksChanged;
+        }
+
         if (newValue != null)
+        {
             newValue.Changed += OnDocumentEdited;
+            newValue.MarksChanged += OnMarksChanged;
+        }
+
 
         DcChannels.Clear();
         if (newValue != null)
@@ -597,6 +753,8 @@ public sealed partial class MainViewModel : ObservableObject
         FixColorsCommand.NotifyCanExecuteChanged();
         FixSectionColorsCommand.NotifyCanExecuteChanged();
         FixAllCommand.NotifyCanExecuteChanged();
+        FillBadCommand.NotifyCanExecuteChanged();
+        NotifyMarkProperties();
     }
 
     partial void OnSelectedIssueChanged(IssueItem? value)
@@ -867,10 +1025,29 @@ public sealed partial class MainViewModel : ObservableObject
         if (mcu.IsBlank)
             return text + "Blank (inserted)";
 
-        int fileOffset = doc.File.Entropy.ToSourceOffset((int)(mcu.BitOffset >> 3));
-        text += $"{mcu.Status}, originally MCU {mcu.SourceIndex}, {mcu.BitLength} bits at file offset 0x{fileOffset:X}";
-        if (BadMcus?.IsBad(index) == true)
-            text += $"\nLooks bad: rugged edge {DescribeEdges(BadMcus.RuggedEdges(index))}";
+        if (mcu.Status == McuStatus.Filled && mcu.IsInserted)
+        {
+            text += "Filled (made up from the picture around it), in place of an inserted blank MCU";
+        }
+        else
+        {
+            int fileOffset = doc.File.Entropy.ToSourceOffset((int)(mcu.BitOffset >> 3));
+            text += $"{mcu.Status}, originally MCU {mcu.SourceIndex}, {mcu.BitLength} bits at file offset 0x{fileOffset:X}";
+            if (mcu.Status == McuStatus.Filled)
+                text += "\nContents made up from the picture around it";
+        }
+        if (BadMcus is { } bad)
+        {
+            string edges = DescribeEdges(bad.RuggedEdges(index));
+            text += bad.Mark(index) switch
+            {
+                McuMark.Bad when bad.IsDetected(index) => $"\nMarked as bad (detected too: rugged edge {edges})",
+                McuMark.Bad => "\nMarked as bad (detection finds it fine)",
+                McuMark.NotBad => $"\nMarked as not bad (detected: rugged edge {edges})",
+                _ when bad.IsBad(index) => $"\nLooks bad: rugged edge {edges}",
+                _ => "",
+            };
+        }
         if (!includeDc)
             return text;
         text += "\n";

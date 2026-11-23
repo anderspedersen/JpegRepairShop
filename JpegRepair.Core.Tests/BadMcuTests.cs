@@ -106,4 +106,152 @@ public class BadMcuTests
         Assert.InRange(deltas[1], -1, 1);
         Assert.InRange(deltas[2], -1, 1);
     }
+
+    /// <summary>The photo with MCU 4037 made much brighter than all its neighbours, so it is flagged.</summary>
+    private static JpegDocument PhotoWithBrightMcu()
+    {
+        var doc = LoadPhoto();
+        doc.AdjustDc(Place, [40, 0, 0]);
+        doc.AdjustDc(Place + 1, [-40, 0, 0]);
+        return doc;
+    }
+
+    [Fact]
+    public void Flagged_mcu_can_be_marked_as_not_bad()
+    {
+        var doc = PhotoWithBrightMcu();
+        int flagged = doc.FindBadMcus().Count;
+        string? lastEdit = doc.UndoDescription;
+        int events = 0;
+        doc.MarksChanged += (_, _) => events++;
+
+        Assert.True(doc.SetMark(Place, McuMark.NotBad));
+
+        var map = doc.FindBadMcus();
+        Assert.False(map.IsBad(Place));
+        Assert.True(map.IsDetected(Place));
+        Assert.Equal(McuMark.NotBad, map.Mark(Place));
+        Assert.Equal(flagged - 1, map.Count);
+        Assert.Equal(1, map.MarkedNotBadCount);
+        Assert.True(doc.HasMarks);
+        Assert.True(doc.IsGood(Place));
+        Assert.Equal(1, events);
+        Assert.Equal(lastEdit, doc.UndoDescription); // not an edit
+
+        Assert.True(doc.SetMark(Place, McuMark.Auto));
+        Assert.True(doc.FindBadMcus().IsBad(Place));
+        Assert.False(doc.HasMarks);
+    }
+
+    [Fact]
+    public void Good_mcu_can_be_marked_as_bad_but_not_as_not_bad()
+    {
+        var doc = LoadPhoto();
+        int good = Enumerable.Range(Place, 1000).First(i => !doc.FindBadMcus().IsBad(i));
+        int flagged = doc.FindBadMcus().Count;
+
+        Assert.False(doc.SetMark(good, McuMark.NotBad));
+        Assert.False(doc.HasMarks);
+
+        Assert.True(doc.SetMark(good, McuMark.Bad));
+        var map = doc.FindBadMcus();
+        Assert.True(map.IsBad(good));
+        Assert.False(map.IsDetected(good));
+        Assert.Equal(McuMark.Bad, map.Mark(good));
+        Assert.Equal(flagged + 1, map.Count);
+        Assert.Equal(1, map.MarkedBadCount);
+        Assert.Contains(good, map.BadIndices());
+        Assert.False(doc.IsGood(good));
+        Assert.Null(doc.FindSection(good));
+        Assert.True(doc.HasMarks);
+
+        Assert.False(doc.SetMark(good, McuMark.Bad)); // already marked
+    }
+
+    [Fact]
+    public void Marks_stay_through_edits_undo_and_redo()
+    {
+        var doc = PhotoWithBrightMcu();
+        doc.SetMark(Place, McuMark.NotBad);
+        doc.SetMark(Place + 10, McuMark.Bad);
+
+        doc.AdjustDc(Place - 3, [5, 0, 0]);
+        doc.Remove(Place - 2 * PerRow);
+        doc.Undo();
+        doc.Undo();
+        doc.Redo();
+
+        var map = doc.FindBadMcus();
+        Assert.Equal(McuMark.NotBad, map.Mark(Place));
+        Assert.Equal(McuMark.Bad, map.Mark(Place + 10));
+    }
+
+    [Fact]
+    public void Blank_mcus_cannot_be_marked()
+    {
+        var doc = LoadPhoto();
+        doc.InsertBlank(Place);
+
+        Assert.False(doc.CanMark(Place, McuMark.Bad));
+        Assert.False(doc.SetMark(Place, McuMark.Bad));
+    }
+
+    [Fact]
+    public void Mark_moves_with_its_mcu()
+    {
+        var doc = PhotoWithBrightMcu();
+        doc.SetMark(Place, McuMark.NotBad);
+        doc.SetMark(Place + 10, McuMark.Bad);
+
+        // An insert before them moves every MCU one step right; kept marks move with their MCUs.
+        doc.InsertBlank(Place - 2 * PerRow);
+
+        var map = doc.FindBadMcus();
+        Assert.Equal(McuMark.NotBad, map.Mark(Place + 1));
+        Assert.False(map.IsBad(Place + 1));
+        Assert.Equal(McuMark.Bad, map.Mark(Place + 11));
+        Assert.True(map.IsBad(Place + 11));
+    }
+
+    [Fact]
+    public void Colour_estimate_leaves_out_mcus_marked_as_bad()
+    {
+        var doc = LoadPhoto();
+
+        // Everything from 4037 on is 20 DC steps brighter. With every MCU of the row being compared marked as bad,
+        // nothing is left to compare.
+        doc.AdjustDc(Place, [20, 0, 0]);
+        Assert.InRange(doc.EstimateDcShift(Place)[0], -21, -18);
+
+        for (int i = Place; i < Place + PerRow; i++)
+            doc.SetMark(i, McuMark.Bad);
+
+        Assert.Equal(PerRow, doc.FindBadMcus().MarkedBadCount);
+        Assert.Equal(new[] { 0, 0, 0 }, doc.EstimateDcShift(Place));
+    }
+
+    [Fact]
+    public void Colour_estimate_uses_mcus_marked_as_not_bad()
+    {
+        var doc = LoadPhoto();
+
+        // Same garbage-like row above as in Colour_fix_ignores_garbage_in_the_row_above; marking all of it as not bad
+        // makes the estimate compare it again, which pulls it away from -20.
+        for (int i = Place - PerRow; i < Place; i++)
+        {
+            if ((i - (Place - PerRow)) % 3 != 2)
+            {
+                doc.AdjustDc(i, [60, 0, 0]);
+                doc.AdjustDc(i + 1, [-60, 0, 0]);
+            }
+        }
+
+        doc.AdjustDc(Place, [20, 0, 0]);
+        var skipping = doc.EstimateDcShift(Place);
+        foreach (int i in doc.FindBadMcus().BadIndices().ToList())
+            doc.SetMark(i, McuMark.NotBad);
+        var comparing = doc.EstimateDcShift(Place);
+
+        Assert.NotEqual(skipping[0], comparing[0]);
+    }
 }

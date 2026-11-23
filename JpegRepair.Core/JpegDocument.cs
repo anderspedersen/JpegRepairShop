@@ -33,14 +33,19 @@ public sealed class McuEntry
 
     public int BitLength { get; }
 
-    /// <summary>Index of the MCU in the original decode, or -1 for a blank MCU inserted by an edit.</summary>
+    /// <summary>Index of the MCU in the original decode, or -1 for an MCU inserted by an edit (blank, or filled since).</summary>
     public int SourceIndex { get; }
 
-    public bool IsBlank => SourceIndex < 0;
+    /// <summary>A flat grey MCU inserted by an edit and not filled since.</summary>
+    public bool IsBlank => Status == McuStatus.Blank;
+
+    /// <summary>Inserted by an edit (not from the original decode).</summary>
+    public bool IsInserted => SourceIndex < 0;
 
     /// <summary>
-    /// Cache for the alignment search: the MCU's edge samples computed without the DC coefficients (edits only move
-    /// MCUs and change DC, never AC, so this never goes stale). Layout: see JpegDocument.EdgeLayout.
+    /// Cache for the alignment search: the MCU's edge samples computed without the DC coefficients (edits move MCUs and
+    /// change DC; filling replaces the entry, so the AC of an entry never changes and this never goes stale).
+    /// Layout: see JpegDocument.EdgeLayout.
     /// </summary>
     internal float[]? AcEdges;
 }
@@ -61,7 +66,11 @@ public sealed partial class JpegDocument : IMcuSource
     private readonly int _samplesPerMcu;
     private int _savedEditId;
     private byte[]? _pixels;
-    private BadMcuMap? _badMcus;
+    private BadMcuMap? _detected;   // what detection found, before the user's marks
+    private BadMcuMap? _badMcus;    // _detected with the marks applied
+
+    // The user's marks (see SetMark), never Auto. Kept per entry, so a mark moves with its MCU on inserts and removes.
+    private readonly Dictionary<McuEntry, McuMark> _marks = new(ReferenceEqualityComparer.Instance);
 
     private JpegDocument(JpegFile file, ScanDecodeResult scan)
     {
@@ -103,6 +112,9 @@ public sealed partial class JpegDocument : IMcuSource
 
     /// <summary>Raised after every edit, undo and redo. The argument is the first MCU index whose content changed.</summary>
     public event EventHandler<int>? Changed;
+
+    /// <summary>Raised when the user's marks change without the picture changing (see <see cref="SetMark"/>).</summary>
+    public event EventHandler? MarksChanged;
 
     public JpegFile File { get; }
 
@@ -165,14 +177,73 @@ public sealed partial class JpegDocument : IMcuSource
     public void EnsureRendered() => _ = Pixels;
 
     /// <summary>
-    /// MCUs of the picture that don't fit their neighbours (2 or more rugged edges), see <see cref="BadMcuDetector"/>.
-    /// Computed from <see cref="Pixels"/> and kept until the next edit, undo or redo.
+    /// MCUs of the picture that don't fit their neighbours (2 or more rugged edges), see <see cref="BadMcuDetector"/>,
+    /// with the user's marks applied (<see cref="SetMark"/>; <see cref="BadMcuMap.IsDetected"/> tells what detection
+    /// found on its own). Computed from <see cref="Pixels"/> and kept until the next edit, undo or redo.
     /// </summary>
-    public BadMcuMap FindBadMcus() => _badMcus ??= BadMcuDetector.Detect(Pixels, Frame, GetStatus);
+    public BadMcuMap FindBadMcus() =>
+        _badMcus ??= (_detected ??= BadMcuDetector.Detect(Pixels, Frame, GetStatus)).WithMarks(StoredMark);
+
+    private McuMark StoredMark(int index) =>
+        index < _mcus.Count && _marks.TryGetValue(_mcus[index], out var mark) ? mark : McuMark.Auto;
+
+    // ---- Overriding bad-MCU detection ------------------------------------------------------------------
+
+    /// <summary>
+    /// True if the MCU at picture position <paramref name="index"/> can be marked as <paramref name="mark"/>:
+    /// <see cref="McuMark.Bad"/> on any MCU decoded without errors or filled, <see cref="McuMark.NotBad"/> only on MCUs detection
+    /// flags, <see cref="McuMark.Auto"/> always.
+    /// </summary>
+    public bool CanMark(int index, McuMark mark)
+    {
+        if (index < 0 || index >= Math.Min(_mcus.Count, Frame.McuCount))
+            return false;
+        return mark switch
+        {
+            McuMark.Bad => _mcus[index].Status is McuStatus.Ok or McuStatus.Filled,
+            McuMark.NotBad => FindBadMcus().IsDetected(index),
+            _ => true,
+        };
+    }
+
+    /// <summary>
+    /// Overrides bad-MCU detection for the MCU at picture position <paramref name="index"/>: <see cref="McuMark.Bad"/>
+    /// makes it bad, <see cref="McuMark.NotBad"/> makes it good while detection flags it, <see cref="McuMark.Auto"/>
+    /// removes the mark. That applies everywhere detection is used: highlighting, sections and the colour estimate.
+    /// Returns false (and changes nothing) if <see cref="CanMark"/> says no or the mark is already set.
+    /// The mark belongs to the MCU and moves with it when MCUs are inserted or removed before it.
+    /// Marks stay until the user changes them, whatever is edited. Not an edit: the picture and the saved file stay the
+    /// same, and it is not in the undo history.
+    /// </summary>
+    public bool SetMark(int index, McuMark mark)
+    {
+        if (!CanMark(index, mark))
+            return false;
+
+        var entry = _mcus[index];
+        if (mark == McuMark.Auto)
+        {
+            if (!_marks.Remove(entry))
+                return false;
+        }
+        else
+        {
+            if (_marks.TryGetValue(entry, out var current) && current == mark)
+                return false;
+            _marks[entry] = mark;
+        }
+
+        _badMcus = null;
+        MarksChanged?.Invoke(this, EventArgs.Empty);
+        return true;
+    }
+
+    /// <summary>True if at least one of the user's marks currently changes what counts as bad.</summary>
+    public bool HasMarks => FindBadMcus().MarkCount > 0;
 
     /// <summary>
     /// True if the MCU at picture position <paramref name="index"/> is good: decoded without errors (Ok; not Corrupt,
-    /// Missing or Blank) and not flagged by bad-MCU detection.
+    /// Missing or Blank) and not bad (see <see cref="FindBadMcus"/>: detection with the user's marks applied).
     /// </summary>
     public bool IsGood(int index) => IsGood(index, FindBadMcus());
 
@@ -254,8 +325,7 @@ public sealed partial class JpegDocument : IMcuSource
         if (deltas.All(d => d == 0))
             return;
 
-        if (mergeWithPrevious && _redo.Count == 0 && _undo.TryPeek(out var top) && top.Id != _savedEditId
-            && top is DcEdit previous && previous.CanMergeWith(fromIndex))
+        if (mergeWithPrevious && WouldMergeDc(fromIndex) && _undo.Peek() is DcEdit previous)
         {
             new DcEdit(fromIndex, deltas.ToArray()).Apply(this); // apply just the extra shift
             previous.Add(deltas);
@@ -268,12 +338,19 @@ public sealed partial class JpegDocument : IMcuSource
     }
 
     /// <summary>
+    /// True if <see cref="AdjustDc"/> at <paramref name="fromIndex"/> with <c>mergeWithPrevious</c> would add to the last
+    /// undo step instead of creating a new one.
+    /// </summary>
+    public bool WouldMergeDc(int fromIndex) =>
+        _redo.Count == 0 && _undo.TryPeek(out var top) && top.Id != _savedEditId && top is DcEdit previous && previous.CanMergeWith(fromIndex);
+
+    /// <summary>
     /// How far the DC of <paramref name="block"/> in the MCU at <paramref name="index"/> has been moved from the
-    /// value originally decoded (0 for blank or missing MCUs).
+    /// value originally decoded (0 for inserted, filled or missing MCUs).
     /// </summary>
     public int GetDcChange(int index, int block)
     {
-        if ((uint)index >= (uint)_mcus.Count || _mcus[index].IsBlank)
+        if ((uint)index >= (uint)_mcus.Count || _mcus[index].IsInserted || _mcus[index].Status == McuStatus.Filled)
             return 0;
         var entry = _mcus[index];
         return entry.Coefficients[block * 64] - Scan.GetBlock(entry.SourceIndex, block)[0];
@@ -529,6 +606,7 @@ public sealed partial class JpegDocument : IMcuSource
     private void RenderFrom(int firstMcu)
     {
         LastChangedRow = Math.Clamp(firstMcu / Frame.McusPerRow, 0, Frame.McuRows);
+        _detected = null;
         _badMcus = null;
         if (_pixels != null)
             Renderer.RenderMcuRows(LastChangedRow, Frame.McuRows - LastChangedRow, _pixels, Width * 4);
