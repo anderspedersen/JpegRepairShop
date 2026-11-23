@@ -20,7 +20,14 @@ Repair Shop shows you the blocks and lets you put them back:
 - **Fix colours**: corrects the colour/brightness shift from the selected block onwards by matching it to the row above.
 - **Fix section colours**: for when the edges don't line up (garbage or misaligned rows above). Matches the colour
   histogram of the selected section (the run of good blocks around the selected one) to the good blocks just before
-  it, and corrects the colours from the section's first block onwards.
+  it, and corrects the colours from the section's first block onwards. It asks how many rows above the section to
+  compare with (2 at first; the last choice is remembered).
+- **Fix all**: finds and fixes misaligned blocks and colour shifts in the whole picture, worst first. As a last step
+  it checks the short stretches between damaged blocks, which a small burst of garbage often leaves with wrong colours
+  or a block or two out of place: each is moved back and/or has its colours corrected, as its own undo step. This last
+  step is optional ("fine-tune"): tick or untick "Continue with fine-tuning the stretches between damaged areas" in the Fix all
+  window, also while it runs; if it is off, the window asks when the first part is done ("Fine-tune" or "Close"). It
+  can take a long time on badly damaged pictures and may now and then make a spot worse.
 - **Fill bad MCUs**: replaces bad, corrupt and blank blocks with contents made up from the picture
   around them. Filled blocks are marked in green. Best done last, after the blocks are back in place and the colours are right.
 - **Adjust DC by hand**: fine-tune brightness (Y) and colour (Cb, Cr) from the selected block onwards. The buttons
@@ -69,6 +76,11 @@ dotnet test
 ```
 
 You can also pass a file to open: `JpegRepairShop.exe broken.jpg`.
+
+A performance log pops up after **Fix all** (timings of the searches, the fine-tuning step, the slowest
+stretches). It is on in every build by default; for a release, turn it off with `-p:EnablePerfLog=false`
+(for example `dotnet publish JpegRepairShop -c Release -p:EnablePerfLog=false`) or set `EnablePerfLog` to
+`false` in `Directory.Build.props`.
 
 ## Project layout
 

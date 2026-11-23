@@ -106,7 +106,7 @@ public sealed partial class MainViewModel : ObservableObject
     [NotifyPropertyChangedFor(nameof(ShowWelcome))]
     [NotifyCanExecuteChangedFor(nameof(InsertBlankCommand), nameof(RemoveMcuCommand), nameof(FixColorsCommand),
         nameof(FixSectionColorsCommand), nameof(FixAllCommand), nameof(UndoCommand), nameof(RedoCommand),
-        nameof(ToggleBadCommand), nameof(FillBadCommand))]
+        nameof(ToggleBadCommand), nameof(FillBadCommand), nameof(ReloadCommand))]
     private bool _isBusy;
 
     /// <summary>Text shown while <see cref="IsBusy"/>.</summary>
@@ -223,6 +223,12 @@ public sealed partial class MainViewModel : ObservableObject
 
     public async Task OpenPathAsync(string path)
     {
+        if (IsBusy)
+        {
+            StatusMessage = "Wait until the current task (e.g. Fix all) is done, or stop it.";
+            return;
+        }
+
         if (Directory.Exists(path))
         {
             StatusMessage = "That is a folder; open a JPEG file instead.";
@@ -274,7 +280,7 @@ public sealed partial class MainViewModel : ObservableObject
             await LoadAsync(FilePath!);
     }
 
-    private bool CanReload() => FilePath != null;
+    private bool CanReload() => FilePath != null && !IsBusy;
 
     [RelayCommand(CanExecute = nameof(CanSave))]
     private void SaveAs() => SaveAsInternal();
@@ -370,12 +376,31 @@ public sealed partial class MainViewModel : ObservableObject
 
     private bool CanFixSectionColors() => HasSelection() && Section is { First: > 0 };
 
+    /// <summary>Rows above a section that "Fix section colours" compares with; asked each time, the last answer remembered.</summary>
+    private int _sectionReferenceRows = JpegDocument.SectionHistogramRows;
+
+    /// <summary>
+    /// Asks how many rows above the selected section to compare with, then matches the section's colours to the good MCUs
+    /// there (see JpegDocument.FixSectionColours).
+    /// </summary>
     [RelayCommand(CanExecute = nameof(CanFixSectionColors))]
     private void FixSectionColors()
     {
         var doc = Document!;
+        if (Section is not { } shown)
+            return;
+        int rowsAbove = Math.Max(1, (shown.First + doc.Frame.McusPerRow - 1) / doc.Frame.McusPerRow);
+        var dialog = new SectionColoursWindow(_sectionReferenceRows, rowsAbove, shown.First)
+        {
+            Owner = Application.Current.MainWindow,
+        };
+        if (dialog.ShowDialog() != true)
+            return;
+        _sectionReferenceRows = dialog.Rows;
+        int rows = dialog.Rows;
+
         (McuSection Section, int[] Deltas)? result = null;
-        long ms = Timed(() => result = doc.FixSectionColours(SelectedMcu));
+        long ms = Timed(() => result = doc.FixSectionColours(SelectedMcu, rows));
         if (result is not { } fixedSection)
         {
             StatusMessage = "No good MCUs before this section to compare its colours with.";
@@ -385,9 +410,9 @@ public sealed partial class MainViewModel : ObservableObject
         var (section, deltas) = fixedSection;
         var names = ComponentNames(doc.Frame);
         StatusMessage = deltas.Any(d => d != 0)
-            ? $"Section colours corrected from MCU {section.First}: " +
+            ? $"Section colours corrected from MCU {section.First} (compared with {rows} rows above): " +
               string.Join(", ", deltas.Select((d, c) => $"{names[c]} {d:+0;-0;0}")) + $" DC steps. ({ms} ms)"
-            : $"The colours of section {section.First}–{section.Last} already match the MCUs before it.";
+            : $"The colours of section {section.First}–{section.Last} already match the {rows} rows before it.";
     }
 
     private bool CanUndo() => !IsBusy && Document?.CanUndo == true;
@@ -396,49 +421,70 @@ public sealed partial class MainViewModel : ObservableObject
 
     private bool CanFixAll() => !IsBusy && Document is { } doc && doc.Frame.McuRows > 1;
 
+    /// <summary>Whether "Fix all" goes on with the stripes (its last, optional step); the last choice is remembered.</summary>
+    private bool _fixAllStripes = true;
+
     /// <summary>Most fixes "Fix all" applies before giving up (a safety net; real pictures need far fewer).</summary>
     private const int MaxAutomaticFixes = 1000;
 
     /// <summary>
     /// Repairs the whole picture: repeatedly finds the worst damage (misalignment, or a colour shift on its own) and
-    /// fixes it (inserts or removes MCUs and fixes the colours), until nothing more is found. Shows progress in a
-    /// window that can stop it. Every fix is its own undo step.
+    /// fixes it (inserts or removes MCUs and fixes the colours), until nothing more is found. Then, as the last step,
+    /// fixes the stripes of the MCU stream (short good stripes moved and/or colour-corrected, bad stripes colour-corrected,
+    /// see JpegDocument.FindNextStripFix), top to bottom, each as soon as it is found. The stripes are optional: a box in
+    /// the window (changeable while the first part runs); if it is off, the window asks when the first part is done. Shows progress in a window that can stop it. Every fix, and every strip,
+    /// is its own undo step. The window is not modal and has a pause button: while it runs, the picture can be zoomed and
+    /// panned, but nothing can be edited (IsBusy).
     /// </summary>
     [RelayCommand(CanExecute = nameof(CanFixAll))]
-    private void FixAll()
+    private async Task FixAll()
     {
         var doc = Document!;
-        var window = new FixAllWindow { Owner = Application.Current.MainWindow };
+        var window = new FixAllWindow { Owner = Application.Current.MainWindow, FixStripes = _fixAllStripes };
+        var closed = new TaskCompletionSource();
+        window.Closed += (_, _) => closed.TrySetResult();
         var watch = Stopwatch.StartNew();
-        int fixes = 0;
+        int fixes = 0, strips = 0;
         string reason = "nothing more found";
+        bool stopped = false;
+        PerfLog.Begin($"Fix all: {Path.GetFileName(FilePath ?? "")}, {doc.Frame.Width}×{doc.Frame.Height}, " +
+                      $"{doc.Frame.McusPerRow}×{doc.Frame.McuRows} MCUs");
+        Task WaitWhilePausedAsync() => window.WaitWhilePausedAsync();
 
         window.Loaded += async (_, _) =>
         {
+            // The searches pause and stop at their own checkpoints (see JpegDocument.Gate), not only between steps.
+            doc.Gate = window.Gate;
             try
             {
                 var applied = new HashSet<string>();
                 while (true)
                 {
+                    await WaitWhilePausedAsync();
                     if (window.Token.IsCancellationRequested)
                     {
                         reason = "stopped";
+                        stopped = true;
                         break;
                     }
 
                     if (fixes >= MaxAutomaticFixes)
                     {
                         reason = $"stopped after {MaxAutomaticFixes} fixes";
+                        stopped = true;
                         break;
                     }
 
                     window.ShowSearching(fixes);
+                    var searchStart = Stopwatch.GetTimestamp();
                     var result = await Task.Run(doc.FindMisalignment);
+                    PerfLog.Add("Alignment: search", Stopwatch.GetElapsedTime(searchStart));
                     if (result == null)
                         break;
                     if (window.Token.IsCancellationRequested)
                     {
                         reason = "stopped";
+                        stopped = true;
                         break;
                     }
 
@@ -450,11 +496,62 @@ public sealed partial class MainViewModel : ObservableObject
                         break;
                     }
 
-                    var colourFix = doc.AlignAndFixColors(result.Index, result.Shift);
+                    int[] colourFix;
+                    using (PerfLog.Time("Alignment: apply fix (incl. render)"))
+                        colourFix = doc.AlignAndFixColors(result.Index, result.Shift);
                     SelectedMcu = result.Index;
                     fixes++;
                     window.AddFix(fixes, DescribeFix(doc, result, colourFix));
                 }
+
+                // Last step: stripes of the MCU stream, in one pass from the top of the picture down. Each search looks
+                // for the first stripe (from the one holding the end of the last fix on) that needs a fix; that fix is
+                // applied at once (its own undo step) and the pass goes on below it, so every stripe is judged against
+                // rows above it that are already fixed. Every search detects the bad MCUs afresh (each fix re-renders,
+                // which drops the cached detection); stripes whose surroundings haven't changed come from the
+                // document's cache.
+                PerfLog.Line($"Alignment phase done: {fixes} fixes, {reason}");
+
+                // The stripes are optional: on if the box is ticked (it can be changed while the first part runs);
+                // otherwise the window asks now, and the user can still go on with them.
+                bool doStripes = !stopped && !window.Token.IsCancellationRequested &&
+                                 (window.FixStripes || await window.AskForStripesAsync());
+                var doneStrips = new HashSet<string>();
+                int from = 0;
+                long passStart = Stopwatch.GetTimestamp();
+                while (doStripes && !stopped)
+                {
+                    await WaitWhilePausedAsync();
+                    if (window.Token.IsCancellationRequested || fixes >= MaxAutomaticFixes)
+                    {
+                        reason = window.Token.IsCancellationRequested ? "stopped" : $"stopped after {MaxAutomaticFixes} fixes";
+                        break;
+                    }
+
+                    window.ShowSearchingStrips(strips);
+                    int start = from;
+                    StripFix? strip;
+                    using (PerfLog.Time("Strips: find next fix"))
+                        strip = await Task.Run(() => doc.FindNextStripFix(start, doneStrips, window.Token));
+                    if (strip == null)
+                        break;
+
+                    from = strip.RegionLast + 1;
+                    doneStrips.Add(strip.Key);
+                    using (PerfLog.Time("Strips: apply fix (incl. render)"))
+                        doc.ApplyStripFix(strip);
+                    SelectedMcu = strip.First + strip.Shift;
+                    fixes++;
+                    strips++;
+                    window.AddFix(fixes, $"{doc.DescribeStripFix(strip)}; seams {strip.CostBefore:0.0} → {strip.CostAfter:0.0} levels");
+                }
+
+                if (doStripes)
+                    PerfLog.Line($"Strip pass done: {strips} fixes, {Stopwatch.GetElapsedTime(passStart).TotalSeconds:0.00} s");
+            }
+            catch (Exception ex) when (WorkGate.IsCancellation(ex))
+            {
+                reason = "stopped";
             }
             catch (Exception ex)
             {
@@ -462,11 +559,25 @@ public sealed partial class MainViewModel : ObservableObject
             }
             finally
             {
+                _fixAllStripes = window.FixStripes;
+                doc.Gate = null;
+                PerfLog.Line($"Done: {fixes} fixes ({strips} strips), {reason}; paused {window.Gate.PausedTime.TotalSeconds:0.0} s");
                 window.Finish();
             }
         };
 
-        window.ShowDialog();
+        IsBusy = true;
+        BusyText = "";
+        try
+        {
+            window.Show();
+            await closed.Task;
+        }
+        finally
+        {
+            IsBusy = false;
+            BusyText = "Loading…";
+        }
 
         string summary = fixes switch
         {
@@ -474,7 +585,12 @@ public sealed partial class MainViewModel : ObservableObject
             1 => "1 fix applied (undo with Ctrl+Z)",
             _ => $"{fixes} fixes applied (each is a separate undo step)",
         };
+        if (strips > 0)
+            summary += strips == 1 ? ", 1 of them fine-tuning" : $", {strips} of them fine-tuning";
         StatusMessage = $"Fix all: {summary}; {reason}. ({watch.Elapsed.TotalSeconds:0.0} s)";
+
+        if (PerfLog.Enabled)
+            new PerfLogWindow(PerfLog.Report()) { Owner = Application.Current.MainWindow }.Show();
     }
 
     // ---- Filling -------------------------------------------------------------------------------------------
@@ -558,7 +674,7 @@ public sealed partial class MainViewModel : ObservableObject
     /// <summary>True if the selected MCU can be marked as bad (decoded without errors).</summary>
     public bool CanMarkSelectedBad => Document?.CanMark(SelectedMcu, McuMark.Bad) == true;
 
-    /// <summary>True if the selected MCU can be marked as not bad (detection flags it).</summary>
+    /// <summary>True if the selected MCU can be marked as not bad (detection flags it, or it has a decoding error).</summary>
     public bool CanMarkSelectedNotBad => Document?.CanMark(SelectedMcu, McuMark.NotBad) == true;
 
     /// <summary>The user's mark on the selected MCU (Auto: detection decides).</summary>
@@ -631,8 +747,16 @@ public sealed partial class MainViewModel : ObservableObject
     [RelayCommand(CanExecute = nameof(CanToggleBad))]
     private void ToggleBad()
     {
-        if (BadMcus is not { } map)
+        if (BadMcus is not { } map || Document is not { } doc)
             return;
+
+        // A decoding error counts as bad; the only mark that changes that is "not bad".
+        if (doc.GetStatus(SelectedMcu) == McuStatus.Corrupt)
+        {
+            SelectedMark = map.Mark(SelectedMcu) == McuMark.NotBad ? McuMark.Auto : McuMark.NotBad;
+            return;
+        }
+
         bool detected = map.IsDetected(SelectedMcu);
         SelectedMark = map.IsBad(SelectedMcu)
             ? detected ? McuMark.NotBad : McuMark.Auto
@@ -1043,6 +1167,7 @@ public sealed partial class MainViewModel : ObservableObject
             {
                 McuMark.Bad when bad.IsDetected(index) => $"\nMarked as bad (detected too: rugged edge {edges})",
                 McuMark.Bad => "\nMarked as bad (detection finds it fine)",
+                McuMark.NotBad when !bad.IsDetected(index) => "\nMarked as not bad: its decoded data is used despite the decoding error",
                 McuMark.NotBad => $"\nMarked as not bad (detected: rugged edge {edges})",
                 _ when bad.IsBad(index) => $"\nLooks bad: rugged edge {edges}",
                 _ => "",

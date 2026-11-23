@@ -524,7 +524,16 @@ public sealed class JpegCanvas : SKElement
 
                     if (status == McuStatus.Corrupt)
                     {
-                        canvas.DrawRect(r, CorruptFill);
+                        // A decoding error, unless the user marked it as not bad (its data still looks right).
+                        if (bad?.Mark(index) == McuMark.NotBad)
+                        {
+                            if (cellW >= 6)
+                                canvas.DrawRect(r, NotBadOutline);
+                        }
+                        else
+                        {
+                            canvas.DrawRect(r, CorruptFill);
+                        }
                     }
                     else if (status == McuStatus.Blank)
                     {

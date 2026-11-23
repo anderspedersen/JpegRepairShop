@@ -1,0 +1,12 @@
+<Project>
+
+    <PropertyGroup>
+        <!--
+            Performance log shown after "Fix all" (JpegRepair.Core.PerfLog). On by default in every configuration;
+            set to false here for releases, or build/publish with -p:EnablePerfLog=false.
+        -->
+        <EnablePerfLog Condition="'$(EnablePerfLog)' == ''">true</EnablePerfLog>
+        <DefineConstants Condition="'$(EnablePerfLog)' == 'true'">$(DefineConstants);PERFLOG</DefineConstants>
+    </PropertyGroup>
+
+</Project>

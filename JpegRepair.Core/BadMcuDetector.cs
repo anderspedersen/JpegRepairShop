@@ -68,7 +68,7 @@ public sealed class BadMcuMap
 
     /// <summary>
     /// The user's mark on the MCU, if it is in effect: <see cref="McuMark.NotBad"/> only while detection flags the MCU
-    /// (<see cref="McuMark.Auto"/> otherwise).
+    /// or the MCU has a decoding error (<see cref="McuMark.Auto"/> otherwise).
     /// </summary>
     public McuMark Mark(int index) => _marks != null && (uint)index < (uint)_marks.Length ? _marks[index] : McuMark.Auto;
 
@@ -77,9 +77,11 @@ public sealed class BadMcuMap
 
     /// <summary>
     /// This (detected) map with the user's marks applied: <see cref="McuMark.Bad"/> makes an MCU bad,
-    /// <see cref="McuMark.NotBad"/> makes a flagged MCU good.
+    /// <see cref="McuMark.NotBad"/> makes a flagged MCU good. A NotBad mark on an MCU that detection doesn't flag is
+    /// kept only where <paramref name="keepNotBad"/> says so (MCUs with a decoding error, which count as bad for their
+    /// status; the mark makes them usable).
     /// </summary>
-    internal BadMcuMap WithMarks(Func<int, McuMark> mark)
+    internal BadMcuMap WithMarks(Func<int, McuMark> mark, Func<int, bool>? keepNotBad = null)
     {
         McuMark[]? marks = null;
         bool[] bad = _detected;
@@ -87,7 +89,7 @@ public sealed class BadMcuMap
         for (int i = 0; i < _detected.Length; i++)
         {
             var m = mark(i);
-            if (m == McuMark.Auto || (m == McuMark.NotBad && !_detected[i]))
+            if (m == McuMark.Auto || (m == McuMark.NotBad && !_detected[i] && keepNotBad?.Invoke(i) != true))
                 continue;
             if (marks == null)
             {
@@ -106,7 +108,8 @@ public sealed class BadMcuMap
             else
             {
                 markedNotBad++;
-                count--;
+                if (bad[i])
+                    count--;
                 bad[i] = false;
             }
         }
@@ -155,11 +158,18 @@ public static class BadMcuDetector
     public const float EdgeFactor = 4f;
 
     /// <summary>
+    /// A more sensitive <see cref="EdgeFactor"/>: flags more MCUs, including more intact ones. Used to find the short
+    /// stretches between damaged MCUs that "Fix all" checks last (see <see cref="JpegDocument.FindStripFix"/>).
+    /// </summary>
+    public const float SensitiveEdgeFactor = 3f;
+
+    /// <summary>
     /// Detects bad MCUs in a rendered picture.
     /// </summary>
     /// <param name="bgra">The picture, <paramref name="frame"/>.Width × Height BGRA, stride Width × 4.</param>
     /// <param name="status">Status of the MCU shown at each picture position (0 .. McuCount-1).</param>
-    public static BadMcuMap Detect(byte[] bgra, FrameHeader frame, Func<int, McuStatus> status)
+    /// <param name="edgeFactor">See <see cref="EdgeFactor"/>; smaller flags more.</param>
+    public static BadMcuMap Detect(byte[] bgra, FrameHeader frame, Func<int, McuStatus> status, float edgeFactor = EdgeFactor)
     {
         int count = frame.McuCount;
         if (count == 0)
@@ -251,7 +261,7 @@ public static class BadMcuDetector
         all.Sort();
         float baseStep = Math.Max(all[all.Count / 2], MinBase);
 
-        const float factor = EdgeFactor;
+        float factor = edgeFactor;
         bool Rugged(float step, float inside) =>
             !float.IsNaN(step) && step > PictureFactor * baseStep && step > factor * (inside + InsideFloor);
 
