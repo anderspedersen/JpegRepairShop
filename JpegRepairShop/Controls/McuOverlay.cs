@@ -125,7 +125,9 @@ public sealed class McuOverlay : FrameworkElement
         bool any = false;
         for (int i = 0; i < isBad.Length; i++)
         {
-            isBad[i] = doc.GetStatus(i) is McuStatus.Corrupt or McuStatus.Blank or McuStatus.Missing || bad?.IsBad(i) == true;
+            var status = doc.GetStatus(i);
+            isBad[i] = status is McuStatus.Blank or McuStatus.Missing || bad?.IsBad(i) == true ||
+                       status == McuStatus.Corrupt && bad?.Mark(i) != McuMark.NotBad;
             any |= isBad[i];
         }
 

@@ -128,7 +128,9 @@ public sealed partial class JpegDocument
         if (count <= perRow)
             return null;
 
+        Checkpoint();
         var rows = new BoundaryRows(this, 0, _mcus.Count);
+        Checkpoint();
         if (FindLineStartShift(rows) is { } fromLineStarts)
             return fromLineStarts;
 
@@ -223,6 +225,7 @@ public sealed partial class JpegDocument
         var gate = new object();
         Parallel.For(0, positions.Count, () => new AlignmentScorer(this, rows), (k, _, scorer) =>
         {
+            Checkpoint();
             var estimate = scorer.Estimate(positions[k], keepCandidates: false);
             if (estimate is { Shift: not 0 })
             {
@@ -299,6 +302,7 @@ public sealed partial class JpegDocument
         double bestScore = double.MinValue;
         for (int q = lo; q <= Math.Min(hi, index + perRow / 4); q++)
         {
+            Checkpoint();
             double score = 0.5 * removed;
             for (int m = lo; m < q; m++)
                 score += unshifted[m - lo];
@@ -344,6 +348,7 @@ public sealed partial class JpegDocument
         var found = new (double Improvement, int[]? Offsets)[positions.Count];
         Parallel.For(0, positions.Count, () => new ColourWindow(this, rows), (k, _, window) =>
         {
+            Checkpoint();
             found[k] = window.Improvement(positions[k]);
             return window;
         }, _ => { });
@@ -367,6 +372,7 @@ public sealed partial class JpegDocument
         double bestScore = 0;
         foreach (int k in picked)
         {
+            Checkpoint();
             int i = positions[k];
             var offsets = found[k].Offsets!;
             int from = Math.Max(perRow, i - perRow), to = Math.Min(count, i + 2 * perRow);
@@ -508,6 +514,7 @@ public sealed partial class JpegDocument
         var usable = new bool[rowCount];
         Parallel.For(0, rowCount, k =>
         {
+            Checkpoint();
             var z = new double[perRow];
             var values = new List<double>(perRow);
             for (int x = 0; x < perRow; x++)
@@ -637,12 +644,18 @@ public sealed partial class JpegDocument
         }
 
         for (int i = lo; i < hi; i += step)
+        {
+            Checkpoint();
             Consider(i);
+        }
         if (agree != null)
         {
             int center = agreeIndex;
             for (int i = Math.Max(perRow, center - step); i <= Math.Min(hi, center + step); i++)
+            {
+                Checkpoint();
                 Consider(i);
+            }
             return new MisalignmentResult(FindShiftStart(rows, agreeIndex, shift), agree);
         }
 
@@ -960,6 +973,7 @@ public sealed partial class JpegDocument
             int blocks = document.Layout.BlocksPerMcu;
             Parallel.For(0, length, () => (Samples: new float[document._samplesPerMcu], Dc: new float[blocks]), (k, _, work) =>
             {
+                document.Checkpoint();
                 int m = from + k;
                 var entry = document._mcus[m];
                 if (entry.Status != McuStatus.Ok)
@@ -1014,6 +1028,7 @@ public sealed partial class JpegDocument
             // mismatch; brightness counts fully, colour at a quarter.
             Parallel.For(0, length, k =>
             {
+                document.Checkpoint();
                 _seam[k] = float.NaN;
                 if (k == 0 || _columns[k - 1] is not { } left || _columns[k] is not { } right)
                     return;
@@ -1241,7 +1256,10 @@ public sealed partial class JpegDocument
 
             var fits = new double?[2 * maxShift + 1];
             for (int shift = -maxShift; shift <= maxShift; shift++)
+            {
+                _document.Checkpoint();
                 fits[shift + maxShift] = Fit(index, end, shift, minimum);
+            }
 
             if (cacheable)
             {

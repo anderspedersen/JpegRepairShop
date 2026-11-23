@@ -68,6 +68,16 @@ public sealed partial class JpegDocument : IMcuSource
     private byte[]? _pixels;
     private BadMcuMap? _detected;   // what detection found, before the user's marks
     private BadMcuMap? _badMcus;    // _detected with the marks applied
+    private BadMcuMap? _sensitive;  // detection with SensitiveEdgeFactor, before the user's marks
+
+    /// <summary>
+    /// Pause/stop control for long searches, set by "Fix all" while it runs (null otherwise). The searches call
+    /// <see cref="Checkpoint"/> often, only at points where nothing has been changed yet.
+    /// </summary>
+    public WorkGate? Gate { get; set; }
+
+    /// <summary>Blocks while <see cref="Gate"/> is paused; throws <see cref="OperationCanceledException"/> once it is stopped.</summary>
+    private void Checkpoint() => Gate?.Checkpoint();
 
     // The user's marks (see SetMark), never Auto. Kept per entry, so a mark moves with its MCU on inserts and removes.
     private readonly Dictionary<McuEntry, McuMark> _marks = new(ReferenceEqualityComparer.Instance);
@@ -182,17 +192,34 @@ public sealed partial class JpegDocument : IMcuSource
     /// found on its own). Computed from <see cref="Pixels"/> and kept until the next edit, undo or redo.
     /// </summary>
     public BadMcuMap FindBadMcus() =>
-        _badMcus ??= (_detected ??= BadMcuDetector.Detect(Pixels, Frame, GetStatus)).WithMarks(StoredMark);
+        _badMcus ??= (_detected ??= BadMcuDetector.Detect(Pixels, Frame, GetStatus)).WithMarks(StoredMark, IsCorruptAt);
+
+    /// <summary>
+    /// Like <see cref="FindBadMcus"/>, with the more sensitive <see cref="BadMcuDetector.SensitiveEdgeFactor"/>
+    /// (the user's marks applied too). Kept until the next edit, undo or redo.
+    /// </summary>
+    public BadMcuMap FindBadMcusSensitive() =>
+        (_sensitive ??= BadMcuDetector.Detect(Pixels, Frame, GetStatus, BadMcuDetector.SensitiveEdgeFactor)).WithMarks(StoredMark, IsCorruptAt);
 
     private McuMark StoredMark(int index) =>
         index < _mcus.Count && _marks.TryGetValue(_mcus[index], out var mark) ? mark : McuMark.Auto;
+
+    private bool IsCorruptAt(int index) => index < _mcus.Count && _mcus[index].Status == McuStatus.Corrupt;
+
+    /// <summary>
+    /// True if the entry's data counts as decoded: decoded without errors (Ok), or with a decoding error (Corrupt) but
+    /// marked as not bad by the user, because what was decoded still looks right.
+    /// </summary>
+    private bool CountsAsDecoded(McuEntry entry) =>
+        entry.Status == McuStatus.Ok ||
+        entry.Status == McuStatus.Corrupt && _marks.TryGetValue(entry, out var mark) && mark == McuMark.NotBad;
 
     // ---- Overriding bad-MCU detection ------------------------------------------------------------------
 
     /// <summary>
     /// True if the MCU at picture position <paramref name="index"/> can be marked as <paramref name="mark"/>:
-    /// <see cref="McuMark.Bad"/> on any MCU decoded without errors or filled, <see cref="McuMark.NotBad"/> only on MCUs detection
-    /// flags, <see cref="McuMark.Auto"/> always.
+    /// <see cref="McuMark.Bad"/> on any MCU decoded without errors or filled, <see cref="McuMark.NotBad"/> on MCUs detection
+    /// flags and on MCUs with a decoding error (whose data often still looks right), <see cref="McuMark.Auto"/> always.
     /// </summary>
     public bool CanMark(int index, McuMark mark)
     {
@@ -201,7 +228,7 @@ public sealed partial class JpegDocument : IMcuSource
         return mark switch
         {
             McuMark.Bad => _mcus[index].Status is McuStatus.Ok or McuStatus.Filled,
-            McuMark.NotBad => FindBadMcus().IsDetected(index),
+            McuMark.NotBad => _mcus[index].Status == McuStatus.Corrupt || FindBadMcus().IsDetected(index),
             _ => true,
         };
     }
@@ -234,6 +261,7 @@ public sealed partial class JpegDocument : IMcuSource
         }
 
         _badMcus = null;
+        _marksVersion++;
         MarksChanged?.Invoke(this, EventArgs.Empty);
         return true;
     }
@@ -242,13 +270,13 @@ public sealed partial class JpegDocument : IMcuSource
     public bool HasMarks => FindBadMcus().MarkCount > 0;
 
     /// <summary>
-    /// True if the MCU at picture position <paramref name="index"/> is good: decoded without errors (Ok; not Corrupt,
-    /// Missing or Blank) and not bad (see <see cref="FindBadMcus"/>: detection with the user's marks applied).
+    /// True if the MCU at picture position <paramref name="index"/> is good: decoded without errors (Ok; or Corrupt and
+    /// marked as not bad; not Missing or Blank) and not bad (see <see cref="FindBadMcus"/>: detection with the user's marks applied).
     /// </summary>
     public bool IsGood(int index) => IsGood(index, FindBadMcus());
 
     private bool IsGood(int index, BadMcuMap bad) =>
-        index >= 0 && index < Math.Min(_mcus.Count, Frame.McuCount) && _mcus[index].Status == McuStatus.Ok && !bad.IsBad(index);
+        index >= 0 && index < Math.Min(_mcus.Count, Frame.McuCount) && CountsAsDecoded(_mcus[index]) && !bad.IsBad(index);
 
     /// <summary>
     /// The section around picture position <paramref name="index"/>: from the first to the last good MCU (see
@@ -369,17 +397,21 @@ public sealed partial class JpegDocument : IMcuSource
         return deltas;
     }
 
-    /// <summary>MCU rows' worth of MCUs compared on each side by <see cref="EstimateSectionColourShift"/>.</summary>
-    private const int SectionHistogramRows = 2;
+    /// <summary>
+    /// MCU rows' worth of MCUs of the section compared by <see cref="EstimateSectionColourShift"/>, and the default
+    /// number of rows' worth of good MCUs before it.
+    /// </summary>
+    public const int SectionHistogramRows = 2;
 
     /// <summary>
     /// Fixes the colours of the section around <paramref name="index"/> from colour histograms (see
     /// <see cref="EstimateSectionColourShift"/>): the DC change is applied from the section's first MCU onwards, as one
     /// undo step. Returns the section and the applied deltas (all zero if the colours already match), or null.
     /// </summary>
-    public (McuSection Section, int[] Deltas)? FixSectionColours(int index)
+    /// <param name="referenceRows">Rows' worth of good MCUs before the section to compare with.</param>
+    public (McuSection Section, int[] Deltas)? FixSectionColours(int index, int referenceRows = SectionHistogramRows)
     {
-        var estimate = EstimateSectionColourShift(index);
+        var estimate = EstimateSectionColourShift(index, referenceRows);
         if (estimate is { } found && found.Deltas.Any(d => d != 0))
             Apply(new DcEdit(found.Section.First, found.Deltas, "Fix section colours"));
         return estimate;
@@ -389,13 +421,14 @@ public sealed partial class JpegDocument : IMcuSource
     /// The colour shift of the section around <paramref name="index"/> (see <see cref="FindSection"/>), found from colour
     /// histograms instead of edges, for places where the edges don't line up (garbage or misaligned rows above).
     /// Per component, the block DC values of the first <see cref="SectionHistogramRows"/> rows' worth of MCUs of the
-    /// section and of the last <see cref="SectionHistogramRows"/> rows' worth of good MCUs before it (skipping bad ones,
+    /// section and of the last <paramref name="referenceRows"/> rows' worth of good MCUs before it (skipping bad ones,
     /// so a garbage band in between does not count) are put into histograms, and the result is the DC change that makes
     /// the section's histogram overlap the earlier one most (histogram intersection; ties go to the smaller change).
     /// Only nearby MCUs are compared because a picture's colours change from place to place.
     /// Null if there is no section at <paramref name="index"/> or no good MCU before it.
     /// </summary>
-    public (McuSection Section, int[] Deltas)? EstimateSectionColourShift(int index)
+    /// <param name="referenceRows">Rows' worth of good MCUs before the section to compare with (at least 1).</param>
+    public (McuSection Section, int[] Deltas)? EstimateSectionColourShift(int index, int referenceRows = SectionHistogramRows)
     {
         if (FindSection(index) is not { } section)
             return null;
@@ -405,8 +438,9 @@ public sealed partial class JpegDocument : IMcuSource
         var inside = new List<int>(window);
         for (int i = section.First; i <= section.Last && inside.Count < window; i++)
             inside.Add(i);
-        var before = new List<int>(window);
-        for (int i = section.First - 1; i >= 0 && before.Count < window; i--)
+        int referenceWindow = Math.Max(1, referenceRows) * Frame.McusPerRow;
+        var before = new List<int>(referenceWindow);
+        for (int i = section.First - 1; i >= 0 && before.Count < referenceWindow; i--)
         {
             if (IsGood(i, bad))
                 before.Add(i);
@@ -520,7 +554,7 @@ public sealed partial class JpegDocument : IMcuSource
 
         for (int k = index; k < end; k++)
         {
-            if (_mcus[k - perRow].Status != McuStatus.Ok || _mcus[k].Status != McuStatus.Ok
+            if (!CountsAsDecoded(_mcus[k - perRow]) || !CountsAsDecoded(_mcus[k])
                 || skip.Contains(_mcus[k - perRow]) || skip.Contains(_mcus[k]))
                 continue;
 
@@ -575,7 +609,7 @@ public sealed partial class JpegDocument : IMcuSource
             return;
         edit.Revert(this);
         _redo.Push(edit);
-        RenderFrom(edit.FirstMcu);
+        RenderFrom(edit.FirstMcu, edit.LastMcu);
         Changed?.Invoke(this, edit.FirstMcu);
     }
 
@@ -585,7 +619,7 @@ public sealed partial class JpegDocument : IMcuSource
             return;
         edit.Apply(this);
         _undo.Push(edit);
-        RenderFrom(edit.FirstMcu);
+        RenderFrom(edit.FirstMcu, edit.LastMcu);
         Changed?.Invoke(this, edit.FirstMcu);
     }
 
@@ -603,19 +637,30 @@ public sealed partial class JpegDocument : IMcuSource
         return bytes;
     }
 
-    private void RenderFrom(int firstMcu)
+    /// <summary>
+    /// Redraws the MCU rows from the one holding <paramref name="firstMcu"/> to the one holding
+    /// <paramref name="lastMcu"/> (to the bottom by default) and forgets the bad-MCU detection.
+    /// </summary>
+    private void RenderFrom(int firstMcu, int lastMcu = int.MaxValue)
     {
-        LastChangedRow = Math.Clamp(firstMcu / Frame.McusPerRow, 0, Frame.McuRows);
+        int rows = Frame.McuRows;
+        LastChangedRow = Math.Clamp(firstMcu / Frame.McusPerRow, 0, rows);
+        int lastRow = lastMcu == int.MaxValue ? rows - 1 : Math.Min(lastMcu / Frame.McusPerRow, rows - 1);
         _detected = null;
         _badMcus = null;
-        if (_pixels != null)
-            Renderer.RenderMcuRows(LastChangedRow, Frame.McuRows - LastChangedRow, _pixels, Width * 4);
+        _sensitive = null;
+        NoteRowsChanged(LastChangedRow, lastRow);
+        if (_pixels != null && lastRow >= LastChangedRow)
+            Renderer.RenderMcuRows(LastChangedRow, lastRow - LastChangedRow + 1, _pixels, Width * 4);
     }
 
     /// <summary>Unclamped samples of every component plane of one MCU (layout: component planes back to back, H*8 × V*8 each).</summary>
-    private void ComponentSamples(int index, float[] dest)
+    private void ComponentSamples(int index, float[] dest) => EntrySamples(_mcus[index], dest);
+
+    /// <summary>Same as <see cref="ComponentSamples"/>, for an entry wherever it is.</summary>
+    private void EntrySamples(McuEntry entry, float[] dest)
     {
-        var coefficients = _mcus[index].Coefficients;
+        var coefficients = entry.Coefficients;
         for (int b = 0; b < Layout.BlocksPerMcu; b++)
         {
             int component = Layout.Blocks[b].ComponentIndex;
@@ -635,7 +680,7 @@ public sealed partial class JpegDocument : IMcuSource
     {
         _undo.Push(edit);
         _redo.Clear();
-        RenderFrom(edit.FirstMcu);
+        RenderFrom(edit.FirstMcu, edit.LastMcu);
         Changed?.Invoke(this, edit.FirstMcu);
     }
 
@@ -648,6 +693,9 @@ public sealed partial class JpegDocument : IMcuSource
         public int Id { get; } = Interlocked.Increment(ref _nextId);
 
         public int FirstMcu { get; } = firstMcu;
+
+        /// <summary>Last MCU whose content can change (everything after the first by default).</summary>
+        public virtual int LastMcu => int.MaxValue;
 
         public abstract string Description { get; }
 

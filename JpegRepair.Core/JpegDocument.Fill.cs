@@ -37,7 +37,7 @@ public sealed partial class JpegDocument
 
     /// <summary>
     /// The MCUs "Fill" replaces by default: every picture position that is bad (see <see cref="FindBadMcus"/>,
-    /// including the user's marks), Corrupt or Blank.
+    /// including the user's marks), Corrupt (unless marked as not bad) or Blank.
     /// </summary>
     public IReadOnlyList<int> FindFillTargets()
     {
@@ -46,7 +46,8 @@ public sealed partial class JpegDocument
         var targets = new List<int>();
         for (int i = 0; i < count; i++)
         {
-            if (_mcus[i].Status is McuStatus.Corrupt or McuStatus.Blank || bad.IsBad(i))
+            var status = _mcus[i].Status;
+            if (status == McuStatus.Blank || status == McuStatus.Corrupt && !CountsAsDecoded(_mcus[i]) || bad.IsBad(i))
                 targets.Add(i);
         }
 
@@ -249,9 +250,10 @@ public sealed partial class JpegDocument
             return Inpainter.Context;     // filled earlier in this plan
         if (index >= _mcus.Count || allTargets.Contains(index) || bad.IsBad(index))
             return Inpainter.Unavailable; // missing, still to be filled, or garbage
+        if (CountsAsDecoded(_mcus[index]))
+            return Inpainter.Source;      // decoded (or corrupt and marked as not bad)
         return _mcus[index].Status switch
         {
-            McuStatus.Ok => Inpainter.Source,
             McuStatus.Filled => Inpainter.Context,
             _ => Inpainter.Unavailable,
         };
