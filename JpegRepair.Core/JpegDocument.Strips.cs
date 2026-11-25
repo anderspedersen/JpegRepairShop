@@ -221,7 +221,10 @@ public sealed partial class JpegDocument
     /// Every point in one bad stripe is tried with the first or last of those in the other, both ways. Everything between
     /// the two points moves together: the good stripe and the bad MCUs between it and the points, which may only have
     /// been displaced. That whole part is scored in its new place and gets one colour correction. A move must clearly
-    /// beat correcting the same part's colour where it is.</para>
+    /// beat correcting the same part's colour where it is. The candidates (staying put and every move that passes) are
+    /// compared over the same stretch, from the first MCU of the bad stripe before to the last of the one after, as it
+    /// would look after the fix: so a move that fixes a short part perfectly but tears up or leaves out the rest of the
+    /// stretch doesn't win over one that puts the whole stretch back.</para>
     ///
     /// <para><b>Bad stripes</b> (same length limit): colour only, as a whole. The sensitive detection flags a
     /// whole stretch with a strongly wrong colour, leaving no good stripe in it.</para>
@@ -474,15 +477,18 @@ public sealed partial class JpegDocument
         var bestDeltas = colourStay ? stay.Deltas : new int[stay.Deltas.Length];
         double bestBefore = stay.CostWithout;
         double bestAfter = colourStay ? stay.CostWith : stay.CostWithout;
-        double bestShare = bestBefore > 0 ? (bestBefore - bestAfter) / bestBefore : 0;
         int bestShift = 0, bestInsert = -1, bestRemove = -1, bestS0 = g0, bestS1 = g1;
 
         if (before is { } b1 && after is { } b2)
         {
+            // Candidates are ranked by the seams of the whole stretch b1.First..b2.Last as it would be after the fix.
+            var window = new StripWindow(scorer, this, b1.First, b2.Last);
+            double bestRank = window.Cost(g0, g1, colourStay ? stay : null);
+
             // Every point of each bad stripe.
             int nearBefore = b1.First;
             int nearAfter = b2.Last + 1;
-            
+
             for (int t = -Math.Min(maxShift, g0 - b1.First); t <= Math.Min(maxShift, b2.Last - g1); t++)
             {
                 Checkpoint();
@@ -521,13 +527,17 @@ public sealed partial class JpegDocument
                     var part = EntriesAt(s0, s1);
                     if (scorer.Fit(part, s0 + t) is not { } moved || scorer.Fit(part, s0) is not { } inPlace)
                         continue;
-                    if (moved.CostWith * (1 + StripShiftPenalty * (k - 1)) >= StripMoveFactor * inPlace.CostWith)
-                        continue;
-                    double share = inPlace.CostWithout > 0 ? (inPlace.CostWithout - moved.CostWith) / inPlace.CostWithout : 0;
-                    if (share <= bestShare)
+                    double penalty = 1 + StripShiftPenalty * (k - 1);
+                    if (moved.CostWith * penalty >= StripMoveFactor * inPlace.CostWith)
                         continue;
 
-                    bestShare = share;
+                    // The positions the move changes: from the first edit point to the last.
+                    int changedFirst = x, changedLast = t > 0 ? y + k - 1 : y - 1;
+                    double rank = window.Cost(changedFirst, changedLast, moved) * penalty;
+                    if (rank >= bestRank)
+                        continue;
+
+                    bestRank = rank;
                     bestBefore = inPlace.CostWithout;
                     bestAfter = moved.CostWith;
                     bestDeltas = moved.Deltas;
@@ -587,7 +597,12 @@ public sealed partial class JpegDocument
         /// <summary>Calls of <see cref="Fit"/> and seam lists worked out (not cached), for the performance log.</summary>
         public int FitCalls, SeamComputations;
 
-        public sealed record FitResult(int[] Deltas, double CostWithout, double CostWith);
+        /// <param name="Deltas">Colour correction per component, in DC steps.</param>
+        /// <param name="CostWithout">Weighted mean seam difference without the correction.</param>
+        /// <param name="CostWith">The same with the correction.</param>
+        /// <param name="SumsWith">Per component: sum of the seam differences with the correction (for <see cref="StripWindow"/>).</param>
+        /// <param name="Counts">Per component: number of seam columns.</param>
+        public sealed record FitResult(int[] Deltas, double CostWithout, double CostWith, double[] SumsWith, int[] Counts);
 
         /// <summary>Seam differences of one component, against the row above.</summary>
         private sealed class Seams
@@ -640,7 +655,54 @@ public sealed partial class JpegDocument
                     deltas[c] = (int)MathF.Round(above / Step(c));
             }
 
-            return new FitResult(deltas, Cost(merged, new int[components]), Cost(merged, deltas));
+            var sums = new double[components];
+            var counts = new int[components];
+            for (int c = 0; c < components; c++)
+            {
+                float shift = deltas[c] * Step(c);
+                foreach (var (difference, _) in merged[c].All)
+                    sums[c] += Math.Abs(difference - shift);
+                counts[c] = merged[c].Count;
+            }
+
+            return new FitResult(deltas, Cost(merged, new int[components]), Cost(merged, deltas), sums, counts);
+        }
+
+        /// <summary>
+        /// Per component, the sum of the seam differences (no correction) and their number for <paramref name="entry"/>
+        /// at <paramref name="position"/>; zeros for an MCU that is not scored.
+        /// </summary>
+        public (double[] Sums, int[] Counts) Unchanged(McuEntry entry, int position)
+        {
+            int components = document.Frame.Components.Count;
+            var sums = new double[components];
+            var counts = new int[components];
+            if (!Scored(entry))
+                return (sums, counts);
+            var seams = SeamsAt(entry, position);
+            for (int c = 0; c < components; c++)
+            {
+                foreach (var (difference, _) in seams[c].All)
+                    sums[c] += Math.Abs(difference);
+                counts[c] = seams[c].Count;
+            }
+
+            return (sums, counts);
+        }
+
+        /// <summary>Weighted mean of per-component sums, as in <see cref="Cost"/>.</summary>
+        public static double WeightedMean(double[] sums, int[] counts)
+        {
+            double sum = 0, weights = 0;
+            for (int c = 0; c < sums.Length; c++)
+            {
+                if (counts[c] == 0)
+                    continue;
+                sum += Weight(c) * sums[c] / counts[c];
+                weights += Weight(c);
+            }
+
+            return weights == 0 ? 0 : sum / weights;
         }
 
         /// <summary>
@@ -726,6 +788,73 @@ public sealed partial class JpegDocument
             }
 
             return into;
+        }
+    }
+
+    /// <summary>
+    /// The seams of a fixed stretch of positions (the bad stripe before a good stripe, the good stripe and the bad stripe
+    /// after it), for comparing candidate fixes of that good stripe on the same MCUs. Positions outside the part a fix
+    /// changes keep their MCU and colour; inside it, the fix's part counts with its colour correction and blanks count
+    /// for nothing. Prefix sums make each comparison cheap.
+    /// </summary>
+    private sealed class StripWindow
+    {
+        private readonly int _first;
+        private readonly double[][] _sums;   // [component][i]: sum over positions first..first+i−1
+        private readonly int[][] _counts;
+
+        public StripWindow(StripScorer scorer, JpegDocument document, int first, int last)
+        {
+            _first = first;
+            int components = document.Frame.Components.Count, length = last - first + 1;
+            _sums = new double[components][];
+            _counts = new int[components][];
+            for (int c = 0; c < components; c++)
+            {
+                _sums[c] = new double[length + 1];
+                _counts[c] = new int[length + 1];
+            }
+
+            for (int i = 0; i < length; i++)
+            {
+                var (sums, counts) = scorer.Unchanged(document._mcus[first + i], first + i);
+                for (int c = 0; c < components; c++)
+                {
+                    _sums[c][i + 1] = _sums[c][i] + sums[c];
+                    _counts[c][i + 1] = _counts[c][i] + counts[c];
+                }
+            }
+        }
+
+        /// <summary>
+        /// Weighted mean seam difference of the stretch when positions <paramref name="changedFirst"/>..
+        /// <paramref name="changedLast"/> hold the part scored by <paramref name="part"/> (its MCUs with their colour
+        /// correction; null = left as they are) and blanks.
+        /// </summary>
+        public double Cost(int changedFirst, int changedLast, StripScorer.FitResult? part)
+        {
+            int components = _sums.Length, end = _sums[0].Length - 1;
+            int a = Math.Clamp(changedFirst - _first, 0, end), b = Math.Clamp(changedLast + 1 - _first, a, end);
+            var sums = new double[components];
+            var counts = new int[components];
+            for (int c = 0; c < components; c++)
+            {
+                // Unchanged before and after the changed positions.
+                sums[c] = _sums[c][a] + _sums[c][end] - _sums[c][b];
+                counts[c] = _counts[c][a] + _counts[c][end] - _counts[c][b];
+                if (part != null)
+                {
+                    sums[c] += part.SumsWith[c];
+                    counts[c] += part.Counts[c];
+                }
+                else
+                {
+                    sums[c] += _sums[c][b] - _sums[c][a];
+                    counts[c] += _counts[c][b] - _counts[c][a];
+                }
+            }
+
+            return StripScorer.WeightedMean(sums, counts);
         }
     }
 

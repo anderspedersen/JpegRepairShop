@@ -421,8 +421,11 @@ public sealed partial class MainViewModel : ObservableObject
 
     private bool CanFixAll() => !IsBusy && Document is { } doc && doc.Frame.McuRows > 1;
 
-    /// <summary>Whether "Fix all" goes on with the stripes (its last, optional step); the last choice is remembered.</summary>
-    private bool _fixAllStripes = true;
+    /// <summary>
+    /// Whether "Fix all" goes on with fine-tuning (the stripes, its last, optional step); off at first, then the last
+    /// choice is remembered.
+    /// </summary>
+    private bool _fixAllStripes;
 
     /// <summary>Most fixes "Fix all" applies before giving up (a safety net; real pictures need far fewer).</summary>
     private const int MaxAutomaticFixes = 1000;
