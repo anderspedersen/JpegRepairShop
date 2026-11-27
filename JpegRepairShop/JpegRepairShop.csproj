@@ -8,6 +8,7 @@
         <UseWPF>true</UseWPF>
         <Product>JPEG Repair Shop</Product>
         <AssemblyTitle>JPEG Repair Shop</AssemblyTitle>
+        <ApplicationIcon>app.ico</ApplicationIcon>
     </PropertyGroup>
 
     <ItemGroup>

@@ -68,7 +68,6 @@ public sealed partial class JpegDocument : IMcuSource
     private byte[]? _pixels;
     private BadMcuMap? _detected;   // what detection found, before the user's marks
     private BadMcuMap? _badMcus;    // _detected with the marks applied
-    private BadMcuMap? _sensitive;  // detection with SensitiveEdgeFactor, before the user's marks
 
     /// <summary>
     /// Pause/stop control for long searches, set by "Fix all" while it runs (null otherwise). The searches call
@@ -150,6 +149,9 @@ public sealed partial class JpegDocument : IMcuSource
 
     public bool CanUndo => _undo.Count > 0;
 
+    /// <summary>Number of steps that can be undone (to undo back to an earlier point).</summary>
+    public int UndoCount => _undo.Count;
+
     public bool CanRedo => _redo.Count > 0;
 
     public string? UndoDescription => _undo.TryPeek(out var edit) ? edit.Description : null;
@@ -193,13 +195,6 @@ public sealed partial class JpegDocument : IMcuSource
     /// </summary>
     public BadMcuMap FindBadMcus() =>
         _badMcus ??= (_detected ??= BadMcuDetector.Detect(Pixels, Frame, GetStatus)).WithMarks(StoredMark, IsCorruptAt);
-
-    /// <summary>
-    /// Like <see cref="FindBadMcus"/>, with the more sensitive <see cref="BadMcuDetector.SensitiveEdgeFactor"/>
-    /// (the user's marks applied too). Kept until the next edit, undo or redo.
-    /// </summary>
-    public BadMcuMap FindBadMcusSensitive() =>
-        (_sensitive ??= BadMcuDetector.Detect(Pixels, Frame, GetStatus, BadMcuDetector.SensitiveEdgeFactor)).WithMarks(StoredMark, IsCorruptAt);
 
     private McuMark StoredMark(int index) =>
         index < _mcus.Count && _marks.TryGetValue(_mcus[index], out var mark) ? mark : McuMark.Auto;
@@ -261,7 +256,6 @@ public sealed partial class JpegDocument : IMcuSource
         }
 
         _badMcus = null;
-        _marksVersion++;
         MarksChanged?.Invoke(this, EventArgs.Empty);
         return true;
     }
@@ -535,7 +529,8 @@ public sealed partial class JpegDocument : IMcuSource
     }
 
     /// <param name="skip">MCUs not to compare (see <see cref="ColourFixSkips"/>).</param>
-    private int[] EstimateDcShift(int index, HashSet<McuEntry> skip)
+    /// <param name="count">MCUs to compare from <paramref name="index"/> on (0: one row's worth).</param>
+    private int[] EstimateDcShift(int index, HashSet<McuEntry> skip, int count = 0)
     {
         var frame = Frame;
         int components = frame.Components.Count;
@@ -550,7 +545,7 @@ public sealed partial class JpegDocument : IMcuSource
 
         var above = new float[_samplesPerMcu];
         var current = new float[_samplesPerMcu];
-        int end = Math.Min(index + perRow, Math.Min(_mcus.Count, frame.McuCount));
+        int end = Math.Min(index + (count > 0 ? count : perRow), Math.Min(_mcus.Count, frame.McuCount));
 
         for (int k = index; k < end; k++)
         {
@@ -648,8 +643,6 @@ public sealed partial class JpegDocument : IMcuSource
         int lastRow = lastMcu == int.MaxValue ? rows - 1 : Math.Min(lastMcu / Frame.McusPerRow, rows - 1);
         _detected = null;
         _badMcus = null;
-        _sensitive = null;
-        NoteRowsChanged(LastChangedRow, lastRow);
         if (_pixels != null && lastRow >= LastChangedRow)
             Renderer.RenderMcuRows(LastChangedRow, lastRow - LastChangedRow + 1, _pixels, Width * 4);
     }

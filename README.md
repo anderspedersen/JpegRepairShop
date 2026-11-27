@@ -40,8 +40,8 @@ dotnet test
 
 You can also pass a file to open: `JpegRepairShop.exe broken.jpg`.
 
-A performance log pops up after **Fix all** (timings of the searches, the fine-tuning step, the slowest
-stretches). It is on in every build by default; for a release, turn it off with `-p:EnablePerfLog=false`
+A performance log pops up after **Fix all** (timings of the planning, the edits and the colour
+searches). It is on in every build by default; for a release, turn it off with `-p:EnablePerfLog=false`
 (for example `dotnet publish JpegRepairShop -c Release -p:EnablePerfLog=false`) or set `EnablePerfLog` to
 `false` in `Directory.Build.props`.
 

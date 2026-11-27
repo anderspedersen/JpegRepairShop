@@ -15,16 +15,17 @@
                 </DataTemplate>
             </ListBox.ItemTemplate>
         </ListBox>
-        <CheckBox x:Name="StripesCheck" Margin="0,10,0,0" Checked="OnStripesChecked"
-                  Content="Continue with fine-tuning the stretches between damaged areas"
-                  ToolTip="Optional last step: short stretches between damaged areas are moved back into place and/or get their colours corrected. Can be changed while the first part runs." />
-        <TextBlock Margin="20,2,0,0" Foreground="Gray" TextWrapping="Wrap"
-                   Text="Can take a long time on badly damaged pictures, and may now and then make a spot worse instead of better." />
+        <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+            <TextBlock Text="Search:" Margin="0,0,8,0" VerticalAlignment="Center" />
+            <RadioButton x:Name="FastRadio" GroupName="Speed" Content="Fast" Margin="0,0,12,0" Checked="OnSpeedChecked"
+                         ToolTip="Good enough for most pictures." />
+            <RadioButton x:Name="SlowRadio" GroupName="Speed" Content="Slow" Margin="0,0,12,0" Checked="OnSpeedChecked"
+                         ToolTip="Tries more possibilities. Takes several times longer." />
+            <RadioButton x:Name="VerySlowRadio" GroupName="Speed" Content="Very slow" Checked="OnSpeedChecked"
+                         ToolTip="Tries even more possibilities. Can take a long time on large pictures." />
+        </StackPanel>
         <TextBlock Text="Each fix is a separate undo step (Ctrl+Z)." Foreground="Gray" Margin="0,6,0,0" />
         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
-            <Button x:Name="StripesButton" Content="Fine-tune" MinWidth="80" Padding="8,3" Margin="0,0,8,0"
-                    Visibility="Collapsed" Click="OnStripesClick"
-                    ToolTip="Go on with the optional last step: fine-tune the stretches between damaged areas." />
             <Button x:Name="PauseButton" Content="Pause" MinWidth="80" Padding="8,3" Margin="0,0,8,0" Click="OnPauseClick"
                     ToolTip="Pause at once, to look at the picture so far (zoom and pan work while paused)." />
             <Button x:Name="StopButton" Content="Stop" MinWidth="80" Padding="8,3" IsCancel="True" Click="OnStopClick" />
