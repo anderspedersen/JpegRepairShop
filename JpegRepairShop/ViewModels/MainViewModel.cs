@@ -421,152 +421,205 @@ public sealed partial class MainViewModel : ObservableObject
 
     private bool CanFixAll() => !IsBusy && Document is { } doc && doc.Frame.McuRows > 1;
 
-    /// <summary>
-    /// Whether "Fix all" goes on with fine-tuning (the stripes, its last, optional step); off at first, then the last
-    /// choice is remembered.
-    /// </summary>
-    private bool _fixAllStripes;
+    /// <summary>Speed of "Fix all": Fast at first, then the last one the user restarted with (for this session).</summary>
+    private FixAllSpeed _fixAllSpeed = FixAllSpeed.Fast;
 
     /// <summary>Most fixes "Fix all" applies before giving up (a safety net; real pictures need far fewer).</summary>
     private const int MaxAutomaticFixes = 1000;
 
     /// <summary>
-    /// Repairs the whole picture: repeatedly finds the worst damage (misalignment, or a colour shift on its own) and
-    /// fixes it (inserts or removes MCUs and fixes the colours), until nothing more is found. Then, as the last step,
-    /// fixes the stripes of the MCU stream (short good stripes moved and/or colour-corrected, bad stripes colour-corrected,
-    /// see JpegDocument.FindNextStripFix), top to bottom, each as soon as it is found. The stripes are optional: a box in
-    /// the window (changeable while the first part runs); if it is off, the window asks when the first part is done. Shows progress in a window that can stop it. Every fix, and every strip,
-    /// is its own undo step. The window is not modal and has a pause button: while it runs, the picture can be zoomed and
-    /// panned, but nothing can be edited (IsBusy).
+    /// "Fix all": plans the inserts and removals for the whole picture at once (JpegDocument.PlanDpFix), applies
+    /// them top to bottom, each with a colour estimate against the row above (JpegDocument.AlignAndFixColors), runs the
+    /// search for colour shifts without misalignment until nothing more is found, and ends with a pass over colour
+    /// stretches (JpegDocument.FindNextColourStretch). If the plan used an embedded preview, the colours come from the
+    /// preview instead (JpegDocument.ApplyThumbnailColours, one undo step); the two colour searches then only run if a
+    /// run was left alone because of a colour step inside it.
+    /// Shows progress in a window that can pause or stop it. Every fix is its own undo step; stopping keeps the fixes
+    /// applied so far. The window starts with the speed chosen last (Fast at first); choosing another speed there undoes
+    /// the run so far and starts it again with that speed.
     /// </summary>
     [RelayCommand(CanExecute = nameof(CanFixAll))]
     private async Task FixAll()
     {
         var doc = Document!;
-        var window = new FixAllWindow { Owner = Application.Current.MainWindow, FixStripes = _fixAllStripes };
+        var window = new FixAllWindow { Owner = Application.Current.MainWindow, Title = "Fix all", Speed = _fixAllSpeed };
         var closed = new TaskCompletionSource();
         window.Closed += (_, _) => closed.TrySetResult();
         var watch = Stopwatch.StartNew();
-        int fixes = 0, strips = 0;
+        int fixes = 0, colourFixes = 0, stretches = 0;
         string reason = "nothing more found";
-        bool stopped = false;
         PerfLog.Begin($"Fix all: {Path.GetFileName(FilePath ?? "")}, {doc.Frame.Width}×{doc.Frame.Height}, " +
                       $"{doc.Frame.McusPerRow}×{doc.Frame.McuRows} MCUs");
-        Task WaitWhilePausedAsync() => window.WaitWhilePausedAsync();
+
+        bool Stopping()
+        {
+            if (window.Token.IsCancellationRequested)
+                reason = "stopped";
+            else if (fixes >= MaxAutomaticFixes)
+                reason = $"stopped after {MaxAutomaticFixes} fixes";
+            else
+                return false;
+            return true;
+        }
 
         window.Loaded += async (_, _) =>
         {
-            // The searches pause and stop at their own checkpoints (see JpegDocument.Gate), not only between steps.
-            doc.Gate = window.Gate;
-            try
+            while (true)
             {
-                var applied = new HashSet<string>();
-                while (true)
+                var speed = window.Speed;
+                int undoStart = doc.UndoCount;
+                PerfLog.Line($"Speed: {speed}");
+                doc.Gate = window.Gate;
+                try
                 {
-                    await WaitWhilePausedAsync();
-                    if (window.Token.IsCancellationRequested)
+                    window.ShowPlanning(0, doc.Frame.McuRows);
+                    var planStart = Stopwatch.GetTimestamp();
+                    var plan = await Task.Run(() => doc.PlanDpFix((done, rows) =>
+                        window.Dispatcher.InvokeAsync(() => window.ShowPlanning(done, rows)), speed: speed));
+                    PerfLog.Add("DP: plan", Stopwatch.GetElapsedTime(planStart));
+                    PerfLog.Line($"DP plan: {plan.Edits.Count} edits ({plan.Inserted} blanks, {plan.Removed} MCUs removed), " +
+                                 $"{plan.ColourStarts.Count} colour starts, {Stopwatch.GetElapsedTime(planStart).TotalSeconds:0.0} s");
+                    PerfLog.Line(plan.Thumbnail is { } usedPreview
+                        ? $"DP: embedded preview {usedPreview.Width}×{usedPreview.Height} at 0x{usedPreview.SourceOffset:X}, " +
+                          $"correlation {usedPreview.Correlation:0.000}"
+                        : "DP: no embedded preview used");
+
+                    // The edits, top to bottom, each with its colour fix.
+                    bool stopped = false;
+                    for (int i = 0; i < plan.Steps.Count; i++)
                     {
-                        reason = "stopped";
-                        stopped = true;
-                        break;
+                        await window.WaitWhilePausedAsync();
+                        stopped = Stopping();
+                        if (stopped)
+                            break;
+
+                        var step = plan.Steps[i];
+                        window.ShowApplying(i + 1, plan.Steps.Count);
+                        int[] colourFix;
+                        using (PerfLog.Time("DP: apply edit and fix colours (incl. render)"))
+                            colourFix = doc.ApplyDpStep(step);
+                        if (step.IsEdit || colourFix.Any(d => d != 0))
+                        {
+                            SelectedMcu = step.Index;
+                            fixes++;
+                            if (!step.IsEdit)
+                                colourFixes++;
+                            window.AddFix(fixes, DescribeDpStep(doc, step, colourFix));
+                        }
+
+                        // Let the picture and the window update between steps.
+                        await Task.Yield();
                     }
 
-                    if (fixes >= MaxAutomaticFixes)
+                    // With an embedded preview, the colours come from it; the colour searches below only run for what it
+                    // leaves alone.
+                    bool colourSearches = plan.Thumbnail == null;
+                    if (!stopped && plan.Thumbnail is { } preview)
                     {
-                        reason = $"stopped after {MaxAutomaticFixes} fixes";
-                        stopped = true;
-                        break;
+                        window.ShowSearchingColours();
+                        (int Changed, int Unsure) runs;
+                        using (PerfLog.Time("DP: colours from the embedded preview (incl. render)"))
+                            runs = doc.ApplyThumbnailColours(preview);
+                        PerfLog.Line($"DP: preview colours: {runs.Changed} runs changed, {runs.Unsure} left (colour step inside)");
+                        if (runs.Changed > 0)
+                        {
+                            fixes++;
+                            colourFixes++;
+                            window.AddFix(fixes, $"Colours of {runs.Changed} runs from the embedded preview ({preview.Width}×{preview.Height})");
+                        }
+
+                        colourSearches = runs.Unsure > 0;
                     }
 
-                    window.ShowSearching(fixes);
-                    var searchStart = Stopwatch.GetTimestamp();
-                    var result = await Task.Run(doc.FindMisalignment);
-                    PerfLog.Add("Alignment: search", Stopwatch.GetElapsedTime(searchStart));
-                    if (result == null)
-                        break;
-                    if (window.Token.IsCancellationRequested)
+                    var applied = new HashSet<string>();
+                    while (!stopped && colourSearches)
                     {
-                        reason = "stopped";
-                        stopped = true;
-                        break;
+                        await window.WaitWhilePausedAsync();
+                        stopped = Stopping();
+                        if (stopped)
+                            break;
+
+                        window.ShowSearchingColours();
+                        var searchStart = Stopwatch.GetTimestamp();
+                        var result = await Task.Run(doc.FindColourShift);
+                        PerfLog.Add("DP: colour search", Stopwatch.GetElapsedTime(searchStart));
+                        if (result == null)
+                            break;
+                        stopped = Stopping();
+                        if (stopped)
+                            break;
+
+                        string key = $"{result.Index}:{string.Join(",", result.ColourFix ?? Array.Empty<int>())}";
+                        if (!applied.Add(key))
+                        {
+                            reason = "the same fix came up again";
+                            break;
+                        }
+
+                        int[] colourFix;
+                        using (PerfLog.Time("DP: apply colour fix (incl. render)"))
+                            colourFix = doc.AlignAndFixColors(result.Index, 0);
+                        SelectedMcu = result.Index;
+                        fixes++;
+                        colourFixes++;
+                        window.AddFix(fixes, DescribeFix(doc, result, colourFix));
                     }
 
-                    // The same fix at the same place again would go round in circles.
-                    string key = $"{result.Index}:{result.Shift}:{string.Join(",", result.ColourFix ?? Array.Empty<int>())}";
-                    if (!applied.Add(key))
+                    // Last: colour stretches (JpegDocument.FindNextColourStretch, no bad-MCU detection), in one pass from the
+                    // top, each applied at once.
+                    int from = 0;
+                    while (!stopped && colourSearches)
                     {
-                        reason = "the same fix came up again";
-                        break;
-                    }
+                        await window.WaitWhilePausedAsync();
+                        stopped = Stopping();
+                        if (stopped)
+                            break;
 
-                    int[] colourFix;
-                    using (PerfLog.Time("Alignment: apply fix (incl. render)"))
-                        colourFix = doc.AlignAndFixColors(result.Index, result.Shift);
-                    SelectedMcu = result.Index;
-                    fixes++;
-                    window.AddFix(fixes, DescribeFix(doc, result, colourFix));
+                        window.ShowSearchingColourStretches();
+                        int start = from;
+                        ColourStretchFix? stretch;
+                        using (PerfLog.Time("DP: colour stretches, find next"))
+                            stretch = await Task.Run(() => doc.FindNextColourStretch(start, window.Token));
+                        if (stretch == null)
+                            break;
+
+                        from = stretch.Last + 1;
+                        using (PerfLog.Time("DP: colour stretches, apply (incl. render)"))
+                            doc.ApplyColourStretch(stretch);
+                        SelectedMcu = stretch.First;
+                        fixes++;
+                        stretches++;
+                        window.AddFix(fixes, $"{doc.DescribeColourStretch(stretch)}; seams {stretch.CostBefore:0.0} → {stretch.CostAfter:0.0} levels");
+                    }
+                }
+                catch (Exception ex) when (WorkGate.IsCancellation(ex))
+                {
+                    reason = "stopped";
+                }
+                catch (Exception ex)
+                {
+                    reason = "failed: " + ex.Message;
+                }
+                finally
+                {
+                    doc.Gate = null;
                 }
 
-                // Last step: stripes of the MCU stream, in one pass from the top of the picture down. Each search looks
-                // for the first stripe (from the one holding the end of the last fix on) that needs a fix; that fix is
-                // applied at once (its own undo step) and the pass goes on below it, so every stripe is judged against
-                // rows above it that are already fixed. Every search detects the bad MCUs afresh (each fix re-renders,
-                // which drops the cached detection); stripes whose surroundings haven't changed come from the
-                // document's cache.
-                PerfLog.Line($"Alignment phase done: {fixes} fixes, {reason}");
+                if (!await window.RestartRequestedAsync())
+                    break;
 
-                // The stripes are optional: on if the box is ticked (it can be changed while the first part runs);
-                // otherwise the window asks now, and the user can still go on with them.
-                bool doStripes = !stopped && !window.Token.IsCancellationRequested &&
-                                 (window.FixStripes || await window.AskForStripesAsync());
-                var doneStrips = new HashSet<string>();
-                int from = 0;
-                long passStart = Stopwatch.GetTimestamp();
-                while (doStripes && !stopped)
-                {
-                    await WaitWhilePausedAsync();
-                    if (window.Token.IsCancellationRequested || fixes >= MaxAutomaticFixes)
-                    {
-                        reason = window.Token.IsCancellationRequested ? "stopped" : $"stopped after {MaxAutomaticFixes} fixes";
-                        break;
-                    }
+                // Start again with the newly chosen speed, from the picture as it was before this run.
+                PerfLog.Line($"Restart with speed {window.Speed}: undoing {doc.UndoCount - undoStart} steps");
+                while (doc.UndoCount > undoStart)
+                    doc.Undo();
+                _fixAllSpeed = window.Speed;
+                fixes = colourFixes = stretches = 0;
+                reason = "nothing more found";
+                window.BeginRun();
+            }
 
-                    window.ShowSearchingStrips(strips);
-                    int start = from;
-                    StripFix? strip;
-                    using (PerfLog.Time("Strips: find next fix"))
-                        strip = await Task.Run(() => doc.FindNextStripFix(start, doneStrips, window.Token));
-                    if (strip == null)
-                        break;
-
-                    from = strip.RegionLast + 1;
-                    doneStrips.Add(strip.Key);
-                    using (PerfLog.Time("Strips: apply fix (incl. render)"))
-                        doc.ApplyStripFix(strip);
-                    SelectedMcu = strip.First + strip.Shift;
-                    fixes++;
-                    strips++;
-                    window.AddFix(fixes, $"{doc.DescribeStripFix(strip)}; seams {strip.CostBefore:0.0} → {strip.CostAfter:0.0} levels");
-                }
-
-                if (doStripes)
-                    PerfLog.Line($"Strip pass done: {strips} fixes, {Stopwatch.GetElapsedTime(passStart).TotalSeconds:0.00} s");
-            }
-            catch (Exception ex) when (WorkGate.IsCancellation(ex))
-            {
-                reason = "stopped";
-            }
-            catch (Exception ex)
-            {
-                reason = "failed: " + ex.Message;
-            }
-            finally
-            {
-                _fixAllStripes = window.FixStripes;
-                doc.Gate = null;
-                PerfLog.Line($"Done: {fixes} fixes ({strips} strips), {reason}; paused {window.Gate.PausedTime.TotalSeconds:0.0} s");
-                window.Finish();
-            }
+            PerfLog.Line($"Done: {fixes} fixes ({colourFixes} colour only, {stretches} colour stretches), {reason}; paused {window.Gate.PausedTime.TotalSeconds:0.0} s");
+            window.Finish();
         };
 
         IsBusy = true;
@@ -588,12 +641,27 @@ public sealed partial class MainViewModel : ObservableObject
             1 => "1 fix applied (undo with Ctrl+Z)",
             _ => $"{fixes} fixes applied (each is a separate undo step)",
         };
-        if (strips > 0)
-            summary += strips == 1 ? ", 1 of them fine-tuning" : $", {strips} of them fine-tuning";
+        if (colourFixes > 0)
+            summary += colourFixes == 1 ? ", 1 of them colours only" : $", {colourFixes} of them colours only";
+        if (stretches > 0)
+            summary += stretches == 1 ? ", 1 colour stretch" : $", {stretches} colour stretches";
         StatusMessage = $"Fix all: {summary}; {reason}. ({watch.Elapsed.TotalSeconds:0.0} s)";
 
         if (PerfLog.Enabled)
             new PerfLogWindow(PerfLog.Report()) { Owner = Application.Current.MainWindow }.Show();
+    }
+
+    private static string DescribeDpStep(JpegDocument doc, DpStep step, IReadOnlyList<int> colourFix)
+    {
+        var frame = doc.Frame;
+        string where = $"MCU {step.Index} (column {step.Index % frame.McusPerRow}, row {step.Index / frame.McusPerRow})";
+        string colours = colourFix.Any(d => d != 0)
+            ? $"colours fixed (DC {string.Join(", ", colourFix.Select(d => d.ToString("+0;-0;0")))})"
+            : "colours already matched";
+        if (!step.IsEdit)
+            return $"Colour shift at {where} (from the plan): {colours}";
+        string what = step.Shift > 0 ? $"inserted {step.Shift} blank MCU(s)" : $"removed {-step.Shift} MCU(s)";
+        return $"At {where}: {what}; {colours}";
     }
 
     // ---- Filling -------------------------------------------------------------------------------------------
@@ -649,8 +717,7 @@ public sealed partial class MainViewModel : ObservableObject
         if (result.Estimate is { } estimate && shift != 0)
         {
             string what = shift > 0 ? $"inserted {shift} blank MCU(s)" : $"removed {-shift} MCU(s)";
-            string how = result.FromLineStarts ? " (found from where lines start; the row above was unusable)" : "";
-            return $"Misalignment at {where}: {what}, fit {estimate.FitWithoutShift:P0} → {estimate.Fit:P0}{how}; {colours}";
+            return $"Misalignment at {where}: {what}, fit {estimate.FitWithoutShift:P0} → {estimate.Fit:P0}; {colours}";
         }
 
         return $"Colour shift at {where}: {colours}";

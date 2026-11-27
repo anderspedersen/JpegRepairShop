@@ -102,7 +102,7 @@
         <KeyBinding Key="F" Modifiers="Shift" Command="{Binding FixSectionColorsCommand}" />
         <KeyBinding Key="B" Command="{Binding ToggleBadCommand}" />
         <KeyBinding Key="I" Modifiers="Control+Shift" Command="{Binding FillBadCommand}" />
-        <KeyBinding Key="A" Modifiers="Control+Shift" Command="{Binding FixAllCommand}" />
+        <KeyBinding Key="D" Modifiers="Control+Shift" Command="{Binding FixAllCommand}" />
     </Window.InputBindings>
 
     <DockPanel>
@@ -162,12 +162,10 @@
                     </StackPanel>
 
                     <TextBlock Text="Repair whole picture" Style="{StaticResource Heading}" />
-                    <UniformGrid Columns="2">
-                        <Button Content="Fix all…" Command="{Binding FixAllCommand}" Margin="0,0,3,0" Padding="2,3"
-                                ToolTip="Find and fix misaligned MCUs and colour shifts in the whole picture, worst first, until nothing more is found (Ctrl+Shift+A). Shows progress and can be stopped; every fix is its own undo step." />
-                        <Button Content="Fill bad MCUs" Command="{Binding FillBadCommand}" Margin="3,0,0,0" Padding="2,3"
-                                ToolTip="Replace every bad (orange), corrupt and blank MCU with contents made up from the picture around it, by copying matching patches (Ctrl+Shift+I). Best done after Fix all. One undo step." />
-                    </UniformGrid>
+                    <Button Content="Fix all…" Command="{Binding FixAllCommand}" Padding="2,3"
+                            ToolTip="Put the whole picture back in line: remove garbage, insert blanks where data was lost, and fix the colours (Ctrl+Shift+D). Takes a minute or two on large pictures. Shows progress and can be stopped; every fix can be undone." />
+                    <Button Content="Fill bad MCUs" Command="{Binding FillBadCommand}" Margin="0,4,0,0" Padding="2,3"
+                            ToolTip="Replace every bad (orange), corrupt and blank MCU with contents made up from the picture around it, by copying matching patches (Ctrl+Shift+I). Best done after Fix all. One undo step." />
 
                     <TextBlock Text="Repair selected section" Style="{StaticResource Heading}" />
                     <Button Content="Fix section colours" Command="{Binding FixSectionColorsCommand}" Padding="2,3"

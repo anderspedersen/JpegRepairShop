@@ -5,9 +5,8 @@ This guide explains why a JPEG that looks ruined can often be repaired, and how 
 - [How a JPEG is stored](#how-a-jpeg-is-stored)
 - [Why a corrupt file can often be recovered](#why-a-corrupt-file-can-often-be-recovered)
 - [Getting started](#getting-started)
-- [Fix all, step 1: lining up rows](#fix-all-step-1-lining-up-rows)
+- [Fix all: lining up rows](#fix-all-lining-up-rows)
 - [Filling the holes](#filling-the-holes)
-- [Fix all, step 2: fine-tune](#fix-all-step-2-fine-tune)
 - [Colours and garbage rows: Fix section colours](#colours-and-garbage-rows-fix-section-colours)
 - [Repairing by hand](#repairing-by-hand)
 - [Bad MCUs and marks](#bad-mcus-and-marks)
@@ -65,23 +64,24 @@ places: at each one, everything after it is shifted sideways and gets a differen
 
 ![lost-data.jpg as it is: from several places down the picture, everything is shifted sideways and has a different colour](examples/lost-data.jpg)
 
-For most pictures, start with **Fix all…** (Ctrl+Shift+A). It works in two steps, and the first one is often all
-you need.
+For most pictures, start with **Fix all…** (Ctrl+Shift+D).
 
-## Fix all, step 1: lining up rows
+## Fix all: lining up rows
 
 In an intact picture each row of MCUs joins smoothly onto the row above it. Where something went wrong, it
-doesn't. Fix all compares the rows with each other, finds where the picture stops fitting, and moves the MCUs from
-there until they line up with the row above again. Then it corrects the colours to match. It keeps going, worst
-damage first, until nothing more is found.
+doesn't. **Fix all…** (Ctrl+Shift+D) puts everything back in line: it removes the garbage, inserts grey blanks where
+data was lost, and fixes the colours.
 
-![The Fix all window while it runs](images/fix-all-window.png)
+On large pictures this takes a minute or two; the window shows how far it has got. You can **Pause** to look at the
+picture so far, or **Stop** at any time; stopping keeps the fixes applied so far. Every fix can be undone with Ctrl+Z.
 
-You can **Pause** to look at the picture so far, or **Stop** at any time. Every fix can be undone with Ctrl+Z.
+Fix all starts with **Fast** search, which is enough for most pictures. If parts are still out of place, choose
+**Slow** or **Very slow** in the Fix all window: it tries more possibilities, but takes longer. Fix all then undoes
+what it has done so far and starts again. Your choice is kept until you close JPEG Repair Shop.
 
-After step 1, lost-data.jpg is back in one piece:
+After Fix all, lost-data.jpg is back in one piece:
 
-![lost-data.jpg after step 1 of Fix all: the picture is in place, with a few small grey stripes](images/lost-data-fixed.png)
+![lost-data.jpg after Fix all: the picture is in place, with a few small grey stripes](images/lost-data-fixed.png)
 
 Look closely and you'll see a few small grey stripes. Those are places where data was really lost: Fix all inserts
 grey blank MCUs there, so that everything after them lines up again. Next to them there are often a few MCUs of
@@ -105,33 +105,13 @@ mistake are replaced too:
 Because the fill is made from the picture around each hole, do it last, when everything is in place and the colours
 are right.
 
-For many pictures, step 1 of Fix all followed by Fill bad MCUs is all it takes. The rest of this guide is for damage
+For many pictures, Fix all followed by Fill bad MCUs is all it takes. The rest of this guide is for damage
 those two don't handle.
-
-## Fix all, step 2: fine-tune
-
-Step 1 looks at whole rows. A small error that doesn't fill a whole row can go unnoticed: the rest of the row is
-right, so the row as a whole still looks fine. This typically leaves a short stretch with the wrong colour, or
-moved a place or two.
-
-![small-error.jpg: a short stretch of the hedge by the lamp post has the wrong colour, and the post is moved sideways inside it](images/small-error-before.png)
-
-The second step goes looking for these short stretches and moves them and/or corrects their colours.
-
-![small-error.jpg after step 2](images/small-error-after.png)
-
-Step 2 is optional: tick or untick **Continue with fine-tuning the stretches between damaged areas** in the Fix all
-window. If it is off, you are asked when step 1 is done. If you use it, do so before Fill bad MCUs.
-
-> **Be careful with step 2.** A short stretch gives very little to go on, so now and then it "corrects" something
-> that was not wrong, especially where the picture itself changes, like along a shadow or a horizon. Look over the
-> picture afterwards and undo (Ctrl+Z) what you don't like. On badly damaged pictures this step can also take a
-> long time.
 
 ## Colours and garbage rows: Fix section colours
 
-Fix all and Fix colours match the colours to **the row just above**. If that row is garbage, the colours are
-matched to the garbage, and the result can be way off.
+Fix colours matches the colours to **the row just above**. If that row is garbage, the colours are matched to the
+garbage, and the result can be way off.
 
 ![garbage-band.jpg: a band of garbage, with wrong colours below it](images/garbage-band.png)
 
@@ -206,7 +186,7 @@ choose an intact picture, ideally from the same camera with the same settings.
 | Fit to window / actual size | Ctrl+0 / Ctrl+1 |
 | Pan | Drag the picture |
 | Select an MCU | Click it, or use the arrow keys; Esc clears it |
-| Fix all | Ctrl+Shift+A |
+| Fix all | Ctrl+Shift+D |
 | Fill bad MCUs | Ctrl+Shift+I |
 | Fix section colours | Shift+F |
 | Fix colours | F |

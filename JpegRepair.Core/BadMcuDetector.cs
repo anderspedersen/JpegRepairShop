@@ -158,12 +158,6 @@ public static class BadMcuDetector
     public const float EdgeFactor = 4f;
 
     /// <summary>
-    /// A more sensitive <see cref="EdgeFactor"/>: flags more MCUs, including more intact ones. Used to find the short
-    /// stretches between damaged MCUs that "Fix all" checks last (see <see cref="JpegDocument.FindStripFix"/>).
-    /// </summary>
-    public const float SensitiveEdgeFactor = 3f;
-
-    /// <summary>
     /// Detects bad MCUs in a rendered picture.
     /// </summary>
     /// <param name="bgra">The picture, <paramref name="frame"/>.Width × Height BGRA, stride Width × 4.</param>

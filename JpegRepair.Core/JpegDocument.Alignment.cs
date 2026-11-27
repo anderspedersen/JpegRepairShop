@@ -28,8 +28,7 @@ public sealed record AlignmentEstimate(int Shift, double Fit, double FitWithoutS
 /// DC change per component (all zero if the colours already match). For a colour shift without misalignment it is
 /// known when found; after aligning it is what was applied. Null if not known yet.
 /// </param>
-/// <param name="FromLineStarts">True if the shift was found from where lines start (the line-start track), not from the fit.</param>
-public sealed record MisalignmentResult(int Index, AlignmentEstimate? Estimate, IReadOnlyList<int>? ColourFix = null, bool FromLineStarts = false)
+public sealed record MisalignmentResult(int Index, AlignmentEstimate? Estimate, IReadOnlyList<int>? ColourFix = null)
 {
     /// <summary>MCUs to insert (positive) or remove (negative); 0 = only the colours need fixing.</summary>
     public int Shift => Estimate?.Shift ?? 0;
@@ -53,7 +52,6 @@ public sealed record MisalignmentResult(int Index, AlignmentEstimate? Estimate, 
 public sealed partial class JpegDocument
 {
     private const int MinBucketWidth = 8;
-    private const double MinImprovement = 0.05;
 
     /// <summary>Minimum score (share of neighbour pixels that agree better) for a colour shift without misalignment.</summary>
     private const double MinColourScore = 0.05;
@@ -72,15 +70,6 @@ public sealed partial class JpegDocument
     /// from the right count is suspicious. Moving towards it is free.
     /// </summary>
     private const double CountPenaltyPerHalfRow = 0.1;
-
-    /// <summary>Cost of changing the line-start column between two MCU rows in the line-start track.</summary>
-    private const double LineStartChangeCost = 80;
-
-    /// <summary>
-    /// A shift found from line starts alone (the fit does not agree) is used only if it makes the fit at most this
-    /// much worse: it may settle a place where the fit cannot tell (garbage above), not overrule a clear fit.
-    /// </summary>
-    private const double LineStartFitTolerance = 0.05;
 
     /// <summary>
     /// MCU rows after the place whose seams are used for the line-start score. More rows would pick up the line starts of
@@ -110,63 +99,6 @@ public sealed partial class JpegDocument
         if (estimate != null)
             ApplyShift(index, estimate.Shift);
         return estimate;
-    }
-
-    /// <summary>
-    /// Searches the whole picture for the place where aligning helps most: the alignment estimate is run every
-    /// quarter row, then at every MCU around the best place, and finally the exact MCU where the shift starts is found
-    /// by checking, MCU by MCU, whether it matches the row above better unshifted or shifted.
-    /// Before that, the line-start track is checked (see <see cref="FindLineStartShift"/>): it also finds shifts below
-    /// a band of garbage, where the row above is useless for the fit.
-    /// If nothing is misaligned, looks for a colour shift on its own instead (see <see cref="FindColourShift"/>).
-    /// Returns null if no place improves noticeably.
-    /// </summary>
-    public MisalignmentResult? FindMisalignment()
-    {
-        int perRow = Frame.McusPerRow;
-        int count = Math.Min(_mcus.Count, Frame.McuCount);
-        if (count <= perRow)
-            return null;
-
-        Checkpoint();
-        var rows = new BoundaryRows(this, 0, _mcus.Count);
-        Checkpoint();
-        if (FindLineStartShift(rows) is { } fromLineStarts)
-            return fromLineStarts;
-
-        int step = Math.Max(1, perRow / 4);
-
-        // Sample every step-th MCU of the original decode, not every step-th position: after an insert or remove the
-        // same MCUs are sampled again, so their cached fits can be reused (see AlignmentScorer.Fits).
-        var coarse = new List<int>();
-        for (int i = perRow; i < count; i++)
-        {
-            var entry = _mcus[i];
-            if (!entry.IsInserted && entry.SourceIndex % step == 0)
-                coarse.Add(i);
-        }
-        var best = BestImprovement(rows, coarse);
-        if (best == null || best.Value.Estimate.Improvement < MinImprovement)
-            return FindColourShift(rows);
-
-        var fine = new List<int>();
-        for (int i = Math.Max(perRow, best.Value.Index - step); i <= Math.Min(count - 1, best.Value.Index + step); i++)
-            fine.Add(i);
-        best = BestImprovement(rows, fine) ?? best;
-
-        var (index, estimate) = best.Value;
-        int start = FindShiftStart(rows, index, estimate.Shift);
-        return new MisalignmentResult(start, estimate);
-    }
-
-    /// <summary>
-    /// Finds the biggest misalignment (see <see cref="FindMisalignment"/>), fixes it there and then fixes the colour
-    /// shift that usually comes with it (one undo step).
-    /// </summary>
-    public MisalignmentResult? FindAndAlign()
-    {
-        var result = FindMisalignment();
-        return result == null ? null : result with { ColourFix = AlignAndFixColors(result.Index, result.Shift) };
     }
 
     /// <summary>
@@ -217,105 +149,6 @@ public sealed partial class JpegDocument
             InsertBlank(index, shift);
         else if (shift < 0)
             Remove(index, -shift);
-    }
-
-    private (int Index, AlignmentEstimate Estimate)? BestImprovement(BoundaryRows rows, List<int> positions)
-    {
-        (int Index, AlignmentEstimate Estimate)? best = null;
-        var gate = new object();
-        Parallel.For(0, positions.Count, () => new AlignmentScorer(this, rows), (k, _, scorer) =>
-        {
-            Checkpoint();
-            var estimate = scorer.Estimate(positions[k], keepCandidates: false);
-            if (estimate is { Shift: not 0 })
-            {
-                lock (gate)
-                {
-                    if (best == null
-                        || estimate.Improvement > best.Value.Estimate.Improvement
-                        || (estimate.Improvement == best.Value.Estimate.Improvement && positions[k] < best.Value.Index))
-                    {
-                        best = (positions[k], estimate);
-                    }
-                }
-            }
-
-            return scorer;
-        }, _ => { });
-        return best;
-    }
-
-    /// <summary>
-    /// Near <paramref name="index"/>, finds the split point where MCUs before it match the row above best unshifted
-    /// and MCUs after it match best with <paramref name="shift"/> (brightness only).
-    /// </summary>
-    private int FindShiftStart(BoundaryRows rows, int index, int shift)
-    {
-        int perRow = Frame.McusPerRow;
-        int count = Math.Min(_mcus.Count, Frame.McuCount);
-        int lo = Math.Max(perRow, index - perRow / 4);
-        int hi = Math.Min(count, index + perRow / 4 + perRow / 2);
-        int width = BucketWidth(0);
-        var histogram = new int[HistogramSize];
-
-        // The usual difference across the boundary before the split (unshifted) and after it (shifted).
-        int Offset(int from, int to, int s)
-        {
-            Array.Clear(histogram);
-            int total = 0;
-            for (int m = from; m < to; m++)
-                total += AddDifferences(rows, m, m + s, count, histogram);
-            return total == 0 ? 0 : BiggestBucketStart(histogram, width);
-        }
-
-        int unshiftedOffset = Offset(Math.Max(perRow, index - perRow / 2), index, 0);
-        int shiftedOffset = Offset(index, Math.Min(count, index + perRow / 2), shift);
-
-        double Agreement(int source, int position, int offset)
-        {
-            var d = LumaDifferences(rows, source, position, count);
-            if (d == null)
-                return 0.5;
-            int inside = 0;
-            foreach (float v in d)
-            {
-                if (v >= offset && v <= offset + width)
-                    inside++;
-            }
-
-            return (double)inside / d.Length;
-        }
-
-        int n = hi - lo;
-        if (n <= 0)
-            return index;
-        var unshifted = new double[n];
-        var shifted = new double[n];
-        for (int m = lo; m < hi; m++)
-        {
-            unshifted[m - lo] = Agreement(m, m, unshiftedOffset);
-            shifted[m - lo] = Agreement(m, m + shift, shiftedOffset);
-        }
-
-        int removed = Math.Max(0, -shift);
-        int bestSplit = index;
-        double bestScore = double.MinValue;
-        for (int q = lo; q <= Math.Min(hi, index + perRow / 4); q++)
-        {
-            Checkpoint();
-            double score = 0.5 * removed;
-            for (int m = lo; m < q; m++)
-                score += unshifted[m - lo];
-            for (int m = q + removed; m < hi; m++)
-                score += shifted[m - lo];
-            if (score > bestScore)
-            {
-                bestScore = score;
-                bestSplit = q;
-            }
-        }
-
-        return bestSplit;
     }
 
     /// <summary>
@@ -495,201 +328,6 @@ public sealed partial class JpegDocument
         while (n > 0 && _mcus[n - 1].Status == McuStatus.Missing)
             n--;
         return n;
-    }
-
-    /// <summary>
-    /// In the stream, the MCU that starts a line usually joins badly to the one before it, so in every MCU row of the
-    /// stream the unusually bad seams vote for the column where lines really start .
-    /// </summary>
-    private MisalignmentResult? FindLineStartShift(BoundaryRows rows)
-    {
-        int perRow = Frame.McusPerRow;
-        int count = Math.Min(_mcus.Count, Frame.McuCount);
-        int rowCount = count / perRow;
-        if (rowCount < 2 || perRow < 4)
-            return null;
-
-        // Votes per stream row.
-        var votes = new double[rowCount][];
-        var usable = new bool[rowCount];
-        Parallel.For(0, rowCount, k =>
-        {
-            Checkpoint();
-            var z = new double[perRow];
-            var values = new List<double>(perRow);
-            for (int x = 0; x < perRow; x++)
-            {
-                if (rows.Seam(k * perRow + x) is { } h)
-                    values.Add(h);
-            }
-
-            votes[k] = z;
-            if (values.Count == 0 || values.Count < perRow / 2)
-                return;
-
-            double median = MedianOf(values.ToArray());
-            double spread = MedianOf(values.Select(v => Math.Abs(v - median)).ToArray()) + 1e-3;
-            for (int x = 0; x < perRow; x++)
-            {
-                if (rows.Seam(k * perRow + x) is { } h)
-                    z[x] = Math.Clamp((h - median) / spread, -5, 20);
-            }
-
-            usable[k] = true;
-        });
-
-        // Best path.
-        var score = new double[perRow];
-        Array.Fill(score, -1e18);
-        score[0] = 0;
-        var back = new int[rowCount][];
-        for (int k = 0; k < rowCount; k++)
-        {
-            int best = ArgMax(score);
-            double switched = score[best] - LineStartChangeCost;
-            back[k] = new int[perRow];
-            var next = new double[perRow];
-            for (int r = 0; r < perRow; r++)
-            {
-                bool change = switched > score[r];
-                back[k][r] = change ? best : r;
-                next[r] = (change ? switched : score[r]) + (usable[k] ? votes[k][r] : 0);
-            }
-
-            score = next;
-        }
-
-        var path = new int[rowCount];
-        path[rowCount - 1] = ArgMax(score);
-        for (int k = rowCount - 1; k > 0; k--)
-            path[k - 1] = back[k][path[k]];
-
-        // Changes, first to last.
-        int previous = 0;
-        AlignmentScorer? scorer = null;
-        for (int k = 0; k < rowCount; k++)
-        {
-            if (path[k] == previous)
-                continue;
-
-            int before = previous, after = path[k];
-            previous = path[k];
-
-            int last = k - 1;
-            for (int kk = k - 1; kk >= 0; kk--)
-            {
-                if (usable[kk] && ArgMax(votes[kk]) == before)
-                {
-                    last = kk;
-                    break;
-                }
-            }
-
-            int first = k;
-            for (int kk = k; kk < rowCount; kk++)
-            {
-                if (path[kk] == after && usable[kk] && ArgMax(votes[kk]) == after)
-                {
-                    first = kk;
-                    break;
-                }
-            }
-
-            int shift = ((before - after) % perRow + perRow) % perRow;
-            if (shift > perRow / 2)
-                shift -= perRow;
-
-            // Where the new content starts: after the worst seam in the line before its first clear line start.
-            int newLineStart = first * perRow + after;
-            int lo = Math.Max(last * perRow + before + 1, newLineStart - perRow + 1), hi = newLineStart;
-            int contentStart = lo;
-            float worst = float.MinValue;
-            for (int p = lo; p < hi; p++)
-            {
-                if (rows.Seam(p) is { } h && h > worst)
-                {
-                    worst = h;
-                    contentStart = p;
-                }
-            }
-
-            scorer ??= new AlignmentScorer(this, rows);
-            if (PlaceLineStartShift(rows, scorer, shift, k, contentStart) is { } result)
-                return result;
-        }
-
-        return null;
-    }
-
-    private MisalignmentResult? PlaceLineStartShift(BoundaryRows rows, AlignmentScorer scorer, int shift, int row, int contentStart)
-    {
-        int perRow = Frame.McusPerRow;
-        int count = Math.Min(_mcus.Count, Frame.McuCount);
-
-        // Does the fit agree on this shift somewhere in the rows around the change?
-        int lo = Math.Max(perRow, (row - 3) * perRow), hi = Math.Min(count - 1, (row + 2) * perRow);
-        int step = Math.Max(1, perRow / 8);
-        int agreeIndex = -1;
-        AlignmentEstimate? agree = null;
-
-        void Consider(int i)
-        {
-            var estimate = scorer.Estimate(i, keepCandidates: false);
-            if (estimate != null && estimate.Shift == shift && estimate.Improvement >= MinImprovement
-                && (agree == null || estimate.Improvement > agree.Improvement))
-            {
-                agree = estimate;
-                agreeIndex = i;
-            }
-        }
-
-        for (int i = lo; i < hi; i += step)
-        {
-            Checkpoint();
-            Consider(i);
-        }
-        if (agree != null)
-        {
-            int center = agreeIndex;
-            for (int i = Math.Max(perRow, center - step); i <= Math.Min(hi, center + step); i++)
-            {
-                Checkpoint();
-                Consider(i);
-            }
-            return new MisalignmentResult(FindShiftStart(rows, agreeIndex, shift), agree);
-        }
-
-        // The fit does not agree: use the line starts if the fit cannot tell otherwise.
-        if (contentStart < perRow)
-            return null;
-        var fit = scorer.FitAt(contentStart, shift);
-        var fitWithout = scorer.FitAt(contentStart, 0);
-        double penalty = scorer.Penalty(shift);
-        if (fit == null || fitWithout == null || fit.Value - penalty < fitWithout.Value - LineStartFitTolerance)
-            return null;
-
-        int index = Math.Max(0, contentStart + Math.Min(shift, 0));
-        var found = new AlignmentEstimate(shift, fit.Value, fitWithout.Value, Array.Empty<AlignmentCandidate>(), penalty);
-        return new MisalignmentResult(index, found, FromLineStarts: true);
-    }
-
-    private static int ArgMax(double[] values)
-    {
-        int best = 0;
-        for (int i = 1; i < values.Length; i++)
-        {
-            if (values[i] > values[best])
-                best = i;
-        }
-
-        return best;
-    }
-
-    private static double MedianOf(double[] values)
-    {
-        Array.Sort(values);
-        int n = values.Length;
-        return n % 2 == 1 ? values[n / 2] : (values[n / 2 - 1] + values[n / 2]) / 2;
     }
 
     private const int MaxCachedPlaces = 50_000;
@@ -874,34 +512,6 @@ public sealed partial class JpegDocument
     }
 
     private int BucketWidth(int component) => (int)MathF.Ceiling(Math.Max(MinBucketWidth, _quant[component][0] / 8f));
-
-    /// <summary>Luma differences (row above minus MCU) for MCU <paramref name="source"/> shown at <paramref name="position"/>, or null.</summary>
-    private float[]? LumaDifferences(BoundaryRows rows, int source, int position, int count)
-    {
-        int perRow = Frame.McusPerRow;
-        if (source < 0 || source >= _mcus.Count || position - perRow < 0 || position >= count)
-            return null;
-        var above = rows.Bottom(position - perRow);
-        var current = rows.Top(source);
-        if (above == null || current == null)
-            return null;
-
-        int columns = VisibleColumns(position, 0);
-        var d = new float[columns];
-        for (int x = 0; x < columns; x++)
-            d[x] = above[x] - current[x];
-        return d;
-    }
-
-    private int AddDifferences(BoundaryRows rows, int source, int position, int count, int[] histogram)
-    {
-        var d = LumaDifferences(rows, source, position, count);
-        if (d == null)
-            return 0;
-        foreach (float v in d)
-            histogram[Bin(v)]++;
-        return d.Length;
-    }
 
     private int VisibleColumns(int position, int component)
     {
