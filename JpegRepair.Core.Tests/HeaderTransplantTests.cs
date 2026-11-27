@@ -74,6 +74,20 @@ public class HeaderTransplantTests
     }
 
     [Fact]
+    public void Preview_after_the_picture_is_not_taken_for_its_scan_start()
+    {
+        var damaged = PhotoWithBrokenHeader(out var original);
+        var data = TestFiles.Read(TestFiles.Photo);
+        var exifPreview = MarkerScan.Run(data).Images[0];
+        damaged = [.. damaged, .. data[exifPreview.SoiOffset!.Value..(exifPreview.ScanEnd + 2)]]; // MPF-style preview after the EOI
+
+        var candidate = HeaderTransplant.Evaluate(damaged[..1000].Concat(damaged[1100..]).ToArray(), data);
+
+        Assert.Equal(HeaderMatch.OtherOffset, candidate.Match);
+        Assert.Equal(original.ScanDataOffset - 100, candidate.DamagedScanOffset);
+    }
+
+    [Fact]
     public void Broken_reference_is_reported_as_unusable()
     {
         var damaged = PhotoWithBrokenHeader(out _);
@@ -93,7 +107,7 @@ public class HeaderTransplantTests
         var reference = TestFiles.Read(TestFiles.Photo);
 
         var candidate = HeaderTransplant.Evaluate(damaged, reference);
-        Assert.Equal(HeaderMatch.OtherOffset, candidate.Match); // only the EXIF preview's SOS is left
+        Assert.Equal(HeaderMatch.None, candidate.Match); // only the EXIF previews' SOS headers are left, and they don't count
 
         var repaired = HeaderTransplant.CombineAtSameOffset(reference, damaged, candidate);
         Assert.Equal(reference, repaired);
