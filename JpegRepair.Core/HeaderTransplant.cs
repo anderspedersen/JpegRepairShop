@@ -14,7 +14,7 @@ public enum HeaderMatch
     /// </summary>
     OtherOffset,
 
-    /// <summary>The start-of-scan header was not found in the damaged file.</summary>
+    /// <summary>The damaged file has no main picture with the same start-of-scan header.</summary>
     None,
 }
 
@@ -22,7 +22,9 @@ public enum HeaderMatch
 /// <param name="ReferenceScanOffset">Where the image data starts in the reference (just after its SOS header).</param>
 /// <param name="DamagedScanOffset">Where the image data starts in the damaged file, or -1 if not found.</param>
 /// <param name="Message">Why a reference was unusable, otherwise null.</param>
-public sealed record HeaderCandidate(HeaderMatch Match, int ReferenceScanOffset, int DamagedScanOffset, string? Message = null);
+/// <param name="ReferenceHeader">The reference's header (see <see cref="JpegFile.Header"/>); null if it is unusable.</param>
+public sealed record HeaderCandidate(HeaderMatch Match, int ReferenceScanOffset, int DamagedScanOffset, string? Message = null,
+                                     byte[]? ReferenceHeader = null);
 
 /// <summary>
 /// Repairs a file whose header (everything before the image data) is damaged by borrowing the header of another
@@ -58,24 +60,26 @@ public static class HeaderTransplant
         int sosOffset = file.Segments[^1].Offset;   // the last parsed segment is the SOS
         int scanOffset = file.ScanDataOffset;
         var sos = reference.AsSpan(sosOffset, scanOffset - sosOffset);
+        byte[] header = file.Header.ToArray();
 
         if (damaged.Length > scanOffset && damaged.AsSpan(sosOffset, sos.Length).SequenceEqual(sos))
-            return new HeaderCandidate(HeaderMatch.SameOffset, scanOffset, scanOffset);
+            return new HeaderCandidate(HeaderMatch.SameOffset, scanOffset, scanOffset, ReferenceHeader: header);
 
-        // Embedded EXIF previews have SOS headers too; the main image's SOS is the last one (scan data never contains 0xFF 0xDA).
-        int found = damaged.AsSpan().LastIndexOf(sos);
-        return found >= 0
-            ? new HeaderCandidate(HeaderMatch.OtherOffset, scanOffset, found + sos.Length)
-            : new HeaderCandidate(HeaderMatch.None, scanOffset, -1);
+        // Thumbnails and previews have SOS headers too, inside the EXIF data or after the main picture's EOI.
+        var main = MarkerScan.Run(damaged).Main;
+        return main != null && damaged.AsSpan(main.FirstScan.Offset, 2 + main.FirstScan.Length).SequenceEqual(sos)
+            ? new HeaderCandidate(HeaderMatch.OtherOffset, scanOffset, main.ScanDataOffset, ReferenceHeader: header)
+            : new HeaderCandidate(HeaderMatch.None, scanOffset, -1, ReferenceHeader: header);
     }
 
-    /// <summary>The reference's bytes up to its image data, followed by the damaged file's bytes from its image data on.</summary>
+    /// <summary>The reference's header, followed by the damaged file's bytes from its image data on.</summary>
     public static byte[] Combine(byte[] reference, byte[] damaged, HeaderCandidate candidate)
     {
         if (candidate.ReferenceScanOffset < 0 || candidate.DamagedScanOffset < 0)
             throw new ArgumentException("The candidate has no start of scan to join at.", nameof(candidate));
 
-        return [.. reference.AsSpan(0, candidate.ReferenceScanOffset), .. damaged.AsSpan(candidate.DamagedScanOffset)];
+        var header = candidate.ReferenceHeader ?? reference.AsSpan(0, candidate.ReferenceScanOffset).ToArray();
+        return [.. header, .. damaged.AsSpan(candidate.DamagedScanOffset)];
     }
 
     /// <summary>
